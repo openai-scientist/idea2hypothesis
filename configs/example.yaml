@@ -1,0 +1,73 @@
+# Example configuration. Secrets are never written here: only the NAMES of environment
+# variables (or AWS profile names) are referenced. See .env.example.
+
+research:
+  topic: ""                      # optional default; runs normally supply their own topic
+  domains: []
+  constraints: []                # for example "no new data collection"
+  hardware_advisory: false       # write hardware_profile.json in stage 1
+  min_relevance: 0.7             # screening keep thresholds (0-1)
+  min_quality: 0.5
+  min_topic_score: 5.0           # stage 2 stops below this overall topic score (0-10)
+  novelty_check: true            # write novelty_report.json in stage 8
+
+llm:
+  provider: openai_compatible    # or: bedrock
+  model: gpt-4o
+  fallback_models: []
+  base_url: https://api.openai.com/v1
+  api_key_env: I2H_LLM_API_KEY
+  # bedrock only:
+  region: ""                     # falls back to AWS_REGION / AWS_DEFAULT_REGION
+  aws_profile: ""                # falls back to AWS_PROFILE
+  timeout_sec: 120
+  max_retries: 3
+  retry_base_delay: 2.0
+  temperature: 0.4
+  max_tokens: 4096
+  debate_rounds: 0               # 0 disables the rebuttal rounds in stage 8
+  # reviewer:                    # optional independent judge; unset keys inherit from above
+  #   model: another-model
+  # pricing:                     # without pricing no cost is reported
+  #   input_per_1k: 0.0025
+  #   output_per_1k: 0.01
+
+literature:
+  sources: [openalex, semantic_scholar, arxiv]
+  max_results_per_query: 20
+  inter_query_delay_sec: 1.0
+  timeout_sec: 30
+  max_retries: 3
+  openalex_email: ""
+  openalex_api_key_env: ""
+  s2_api_key_env: S2_API_KEY
+  cache: false
+  default_year_min: 0
+
+prompts:
+  override_file: ""
+  domain: ml                     # ml | hep | biology
+
+runtime:
+  max_retries: 1                 # bounded stage retries on transient provider errors
+  retry_delay_sec: 2.0
+  concurrency: 4
+  ideation_memory: false
+
+review:
+  mode: copilot                  # auto | light | copilot | full
+
+storage:
+  runs_root: runs
+  cache_root: .cache
+
+api:
+  host: 127.0.0.1
+  port: 8001
+  service_key_env: I2H_SERVICE_KEY     # inbound key (BE POPPER_SERVICE_KEY)
+  callback_key_env: I2H_CALLBACK_KEY   # webhook key (BE POPPER_CALLBACK_KEY); defaults to the inbound key
+  callback_allowed_hosts: []     # webhook callbacks are rejected unless the host is listed
+  callback_allow_any: false
+  delivery_max_attempts: 5
+  delivery_backoff_max_sec: 60
+  cors_origins: []

@@ -1,0 +1,12 @@
+.venv/
+runs/
+.cache/
+__pycache__/
+*.py[cod]
+dist/
+build/
+*.egg-info/
+.env
+.pytest_cache/
+.ruff_cache/
+tools/dashboard/data.js

@@ -1,0 +1,64 @@
+# Local end-to-end setup with ai-research-platform BE (Docker) and FE.
+#
+# The BE container reaches the engine at POPPER_BASE_URL=http://host.docker.internal:8001,
+# so the API listens on all interfaces. The BE builds callback URLs from its PUBLIC_BASE_URL
+# (http://localhost:8000 by default), so that host is allowed for webhook deliveries.
+# Secrets come from the environment only (see .env.example and tools/serve_api.py).
+
+research:
+  domains: []
+  constraints: []
+  hardware_advisory: false
+  min_relevance: 0.7
+  min_quality: 0.5
+  min_topic_score: 5.0
+  novelty_check: true
+
+llm:
+  provider: bedrock
+  model: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  fallback_models: []
+  region: ""                     # falls back to AWS_REGION
+  aws_profile: ""                # falls back to AWS_PROFILE / access keys in the environment
+  timeout_sec: 120
+  max_retries: 6                 # Bedrock per-minute quotas throttle bursts; back off
+  retry_base_delay: 5.0          # 5, 10, 20, 40, 80 s (+ jitter) before giving up
+  temperature: 0.4
+  max_tokens: 4096
+  debate_rounds: 0
+
+literature:
+  sources: [openalex, semantic_scholar, arxiv]
+  max_results_per_query: 20
+  inter_query_delay_sec: 1.0
+  timeout_sec: 30
+  max_retries: 3
+  s2_api_key_env: S2_API_KEY
+  cache: true
+
+prompts:
+  domain: ml
+
+runtime:
+  max_retries: 2                 # stage-level retries after the LLM retries are exhausted
+  retry_delay_sec: 30.0
+  concurrency: 2                 # parallel LLM calls in stage 8; keep low under Bedrock quotas
+  ideation_memory: false
+
+review:
+  mode: copilot
+
+storage:
+  runs_root: runs
+  cache_root: .cache
+
+api:
+  host: 0.0.0.0
+  port: 8001
+  service_key_env: I2H_SERVICE_KEY     # = BE POPPER_SERVICE_KEY (BE -> engine)
+  callback_key_env: I2H_CALLBACK_KEY   # = BE POPPER_CALLBACK_KEY (engine -> BE webhooks)
+  callback_allowed_hosts: [localhost, 127.0.0.1, host.docker.internal]
+  callback_allow_any: false
+  delivery_max_attempts: 8
+  delivery_backoff_max_sec: 60
+  cors_origins: []

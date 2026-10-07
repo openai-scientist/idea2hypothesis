@@ -1,0 +1,127 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install (api, bedrock and dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[api,bedrock,dev]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Tests (unit, integration, contracts; no network)
+        run: python -m pytest -q
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Audit wheel contents
+        run: |
+          python - <<'PY'
+          import glob
+          import sys
+          import zipfile
+
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, wheels
+          names = zipfile.ZipFile(wheels[0]).namelist()
+          forbidden = ("tests/", "tools/", "runs/", "dashboard/", ".github/")
+          bad = [n for n in names if n.startswith(forbidden) or ".env" in n.split("/")[-1]]
+          assert not bad, f"unexpected files in wheel: {bad}"
+          required = [
+              "idea2hypothesis/prompts/stages.yaml",
+              "idea2hypothesis/prompts/hypothesis_roles.yaml",
+              "idea2hypothesis/prompts/domains/hep.yaml",
+              "idea2hypothesis/prompts/domains/biology.yaml",
+          ]
+          missing = [r for r in required if r not in names]
+          assert not missing, f"prompt assets missing from wheel: {missing}"
+          entry = [n for n in names if n.endswith("entry_points.txt")]
+          assert not entry, f"the wheel must not define console scripts: {entry}"
+          print("wheel audit ok:", len(names), "files")
+          PY
+
+      - name: Core import smoke (wheel only, no extras)
+        run: |
+          python -m venv "$RUNNER_TEMP/core-venv"
+          if [ -d "$RUNNER_TEMP/core-venv/Scripts" ]; then
+            PY="$RUNNER_TEMP/core-venv/Scripts/python"
+          else
+            PY="$RUNNER_TEMP/core-venv/bin/python"
+          fi
+          "$PY" -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$PY" -c "
+          import idea2hypothesis
+          from idea2hypothesis.config import load_config
+          from idea2hypothesis.pipeline.runner import run_pipeline
+          from idea2hypothesis.prompts.loader import PromptLoader
+          loader = PromptLoader('ml')
+          assert loader.snapshot()
+          print('core import ok', idea2hypothesis.__file__)
+          "
+
+      - name: API startup smoke (Swagger and health)
+        run: |
+          python - <<'PY'
+          import importlib.util
+
+          if importlib.util.find_spec("idea2hypothesis.api") is None:
+              raise SystemExit("idea2hypothesis.api is missing")
+          import asyncio
+
+          import httpx
+
+          from idea2hypothesis.api.app import create_app
+          from idea2hypothesis.config import load_config
+
+          async def main() -> None:
+              app = create_app(load_config(None))
+              async with httpx.AsyncClient(
+                  transport=httpx.ASGITransport(app=app), base_url="http://test"
+              ) as client:
+                  assert (await client.get("/api/health")).status_code == 200
+                  assert (await client.get("/docs")).status_code == 200
+
+          asyncio.run(main())
+          print("api smoke ok")
+          PY
+
+  names:
+    name: no legacy names
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail on legacy project names in code
+        run: |
+          if grep -rniE "[r]esearchclaw|[s]ibyl|[m]etaclaw|[o]penclaw|from [a]rc" src tests tools configs; then
+            echo "legacy name found" >&2
+            exit 1
+          fi

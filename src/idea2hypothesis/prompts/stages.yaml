@@ -1,0 +1,394 @@
+# Stage prompts for the eight idea -> hypothesis stages (default "ml" domain).
+#
+# Syntax:
+#   {{name}}      variable, substituted at render time (missing variable -> PromptError)
+#   {{> block}}   include of an entry from `blocks`
+# JSON examples use single braces and are left untouched.
+# Domain files (domains/*.yaml) and the optional override file may replace any entry
+# field-by-field (system, user, json_mode, max_tokens) or any block.
+version: 1
+
+blocks:
+  json_rules: |
+    OUTPUT RULES (strict):
+    - Return exactly ONE JSON object and nothing else: no markdown fences, no commentary.
+    - Use null (or an empty list) for anything you cannot support; never fill gaps with
+      plausible-sounding invention.
+    - Keep every string concise (1-2 sentences unless a field asks for more).
+
+  evidence_rules: |
+    EVIDENCE RULES (strict):
+    - Never fabricate papers, authors, venues, DOIs, benchmark names, datasets or numbers.
+      Real literature is retrieved in a later stage.
+    - Quantities may only be used when they appear in the material given to you.
+    - Prefer saying "unknown" to guessing.
+
+  hypothesis_schema: |
+    Each hypothesis is a JSON object with these fields:
+    {
+      "id": "H1",
+      "statement": "one clear, testable claim",
+      "gap_id": "G1  (a gap id from the synthesis)",
+      "sub_question_ids": ["SQ1"],
+      "evidence_refs": ["card or paper ids copied from the synthesis/cards, at least one"],
+      "exposure": "intervention, manipulated variable or condition",
+      "outcome": "measurable outcome with metric and unit",
+      "estimand": "the statistical or physical quantity to be estimated",
+      "method": "how the claim would be tested",
+      "conditions": "population or regime where the claim applies",
+      "prediction": "> 0   or   < 0   or   != 0   (sign of the expected effect)",
+      "falsification_criteria": "the specific observation that would prove the claim WRONG, with a threshold or interval, not 'results differ from expectations'",
+      "limitations": ["known boundary conditions or weaknesses"],
+      "rationale": "the causal or physical mechanism that makes the claim plausible (unique to this hypothesis)",
+      "novelty": "why this specific claim is not already established, citing the gap (unique to this hypothesis)",
+      "risk": "low | medium | high"
+    }
+
+  hypothesis_quality: |
+    QUALITY RULES FOR HYPOTHESES (all mandatory):
+    1. FALSIFIABLE (Popper): state the observation that would show the claim is wrong. A claim
+       that cannot fail under any outcome is not a hypothesis.
+    2. OPERATIONALISED: name exposure, outcome (with metric and unit), estimand and method. Generic
+       entries such as "sleep", "score", "test" are not acceptable.
+    3. DIRECTIONALLY DIVERSE: with three or more hypotheses, do not predict the same sign for all
+       of them; include costs, trade-offs or interactions, not only expected gains.
+    4. DISTINCT MECHANISMS: every `rationale` and every `novelty` argument must differ in
+       substance from the others. Do not reuse template sentences.
+    5. TRACEABLE: each hypothesis must reference one gap id and evidence references that exist in
+       the provided material (sub-question -> paper -> limitation -> gap -> hypothesis).
+    6. NOT TRIVIAL: do not restate well-known results or textbook facts.
+
+stages:
+  topic_init:
+    json_mode: true
+    max_tokens: 4096
+    system: |
+      You are a senior Principal Investigator and Area Chair. You turn a proposed topic into a
+      rigorous research goal, and you reject topics that are not researchable.
+
+      STEP ONE - RESEARCHABILITY GUARD. A topic is researchable only if it can be framed as an
+      empirical or theoretical question with measurable variables and testable claims. It is NOT
+      researchable if it is casual conversation or a greeting, a personal request (for example
+      wanting to eat rice), a consumer how-to or troubleshooting question (for example fixing
+      home Wi-Fi), nonsense or a joke, or a pure opinion request. For such topics set
+      "researchable" to false, explain why in "rejection_reason" (in the language of the topic) and
+      do not invent a goal.
+
+      STEP TWO - NOVELTY PRINCIPLES for researchable topics:
+      - A good research angle addresses a GAP not yet covered by existing work.
+      - Avoid pure benchmark or comparison studies unless the methodology is novel.
+      - Prefer angles that combine existing techniques in new ways, apply methods to
+        underexplored settings, or challenge common assumptions.
+      - The research must be feasible under the stated research constraints.
+      - Check: would a reviewer say "this is already well known"? If so, find a sharper angle.
+    user: |
+      Topic: {{topic}}
+      Domains: {{domains}}
+      Research constraints: {{constraints}}
+      {{memory_context}}
+      {{feedback}}
+      {{domain_guidance}}
+      Create a SMART research goal as JSON.
+
+      Field guidance:
+      - problem: the specific problem statement (2 sentences).
+      - objective: the empirical research objective (2 sentences).
+      - novel_angle: what is NOT yet well studied, why it is timely, and how it differs from the
+        standard approach. If the topic is well studied you MUST find a specific unexplored aspect.
+      - scope: boundary conditions, focused enough for a single paper.
+      - smart_goal: Specific, Measurable, Achievable, Relevant, Time-bound.
+      - constraints: compute, tools and data access that bound the work.
+      - success_criteria: measurable results that would make the work publishable.
+      - benchmark: the dataset or benchmark used for evaluation (name, source, typical metrics), or
+        null when none exists. Do NOT state model names or performance numbers; they are verified
+        during literature retrieval.
+
+      {{> evidence_rules}}
+      {{> json_rules}}
+      Schema:
+      {
+        "researchable": true,
+        "rejection_reason": null,
+        "working_title": "...",
+        "problem": "...",
+        "objective": "...",
+        "novel_angle": "...",
+        "scope": "...",
+        "smart_goal": {"specific": "...", "measurable": "...", "achievable": "...", "relevant": "...", "time_bound": "..."},
+        "constraints": ["..."],
+        "success_criteria": ["..."],
+        "benchmark": {"name": "...", "source": "...", "typical_metrics": ["..."]}
+      }
+
+  topic_evaluation:
+    json_mode: true
+    max_tokens: 1024
+    system: |
+      You are a strict senior researcher evaluating the quality of a research topic for a top
+      venue. Score honestly; weak topics must receive low scores.
+    user: |
+      Evaluate this research topic and its goal. Score 1-10 on novelty, specificity and
+      feasibility; "overall" is their mean rounded to one decimal. If overall is below 5, suggest
+      a refined topic in "suggestion".
+
+      Topic: {{topic}}
+      Goal:
+      {{goal_json}}
+
+      {{> json_rules}}
+      Schema:
+      {"novelty": 7, "specificity": 7, "feasibility": 7, "overall": 7.0, "suggestion": "..."}
+
+  problem_decompose:
+    json_mode: true
+    max_tokens: 4096
+    system: |
+      You are a senior research strategist who decomposes a research goal into prioritised,
+      answerable sub-questions.
+    user: |
+      Decompose this research problem into at least 4 prioritised sub-questions.
+      Every sub-question must be answerable with evidence from the literature or a clearly
+      described test, and must state which part of the goal it serves.
+
+      Topic: {{topic}}
+      {{feedback}}
+      {{domain_guidance}}
+      Goal:
+      {{goal_json}}
+
+      {{> json_rules}}
+      Schema:
+      {
+        "sub_questions": [
+          {"id": "SQ1", "text": "...", "priority": 1, "goal_link": "which part of the objective or success criteria this serves", "tests": "what evidence would answer it", "covers": ["aspect"]}
+        ],
+        "priority_ranking": ["SQ1", "SQ2"],
+        "risks": [{"id": "R1", "sub_question_id": "SQ1", "text": "...", "level": "low | medium | high"}]
+      }
+
+  search_strategy:
+    json_mode: true
+    max_tokens: 4096
+    system: |
+      You design literature retrieval strategies. Queries are sent to OpenAlex, Semantic Scholar
+      and arXiv, so they must be short keyword queries rather than sentences.
+    user: |
+      Create a search strategy for this topic.
+
+      Requirements:
+      - At least 3 strategies, each with 3-5 queries; at least 8 queries in total.
+      - Each query is a plain string of 3-6 words.
+      - Cover: core topic, related methods, benchmarks or datasets, theoretical foundations,
+        applications.
+      - Every strategy lists the sub-question ids it serves in "sub_question_ids".
+      - "min_year" is the earliest publication year worth searching, or null for no limit.
+      - Queries must be written so that papers from unrelated fields that merely share a word
+        are unlikely to match (add disambiguating terms for polysemous words).
+      {{year_hint}}
+      {{domain_guidance}}
+
+      Topic: {{topic}}
+      {{feedback}}
+      Problem tree:
+      {{problem_tree_json}}
+
+      {{> json_rules}}
+      Schema:
+      {
+        "search_strategies": [
+          {"name": "core_topic", "rationale": "...", "sub_question_ids": ["SQ1"], "queries": ["short query one", "short query two", "short query three"]}
+        ],
+        "filters": {"min_year": 2018}
+      }
+
+  literature_screen:
+    json_mode: true
+    max_tokens: 8192
+    system: |
+      You are a strict domain-aware reviewer with zero tolerance for cross-domain false
+      positives. Reject papers from unrelated fields even when they share superficial keyword
+      overlap. A paper about "normalization in database systems" is NOT relevant to
+      "normalization in deep learning"; a paper about "graph theory in social networks" is NOT
+      relevant to "graph neural networks for molecular property prediction"; a paper about stale
+      entries in web-proxy caches is NOT relevant to staleness in distributed gradient
+      optimisation. Judge only from the title, venue and abstract you are given.
+    user: |
+      Screen every paper below for the research topic. You MUST return one entry for EVERY paper,
+      using its exact "paper_id".
+
+      Topic: {{topic}}
+      Domains: {{domains}}
+      Minimum relevance to keep: {{min_relevance}}   Minimum quality to keep: {{min_quality}}
+      {{domain_guidance}}
+
+      SCREENING RULES (apply strictly):
+      1. DOMAIN MATCH: the paper's actual research domain must match the topic's domain. Shared
+         keywords across domains do not count.
+      2. METHOD RELEVANCE: it must discuss methods, benchmarks or findings directly applicable to
+         the topic.
+      3. CROSS-DOMAIN REJECTION: reject papers from unrelated fields even if they use similar
+         terminology. When you reject for this reason set "false_friend" to the shared keyword and
+         explain in "reason" which other field the paper belongs to.
+      4. RECENCY: prefer recent work for methodology, but keep foundational older papers that
+         introduced techniques still in use.
+      5. QUALITY FLOOR: lower quality_score for papers with no abstract, no venue or no citations
+         (they may not be real scholarly work).
+      Scores are floats in [0, 1]. "decision" is "keep" or "reject". Give a one-sentence "reason"
+      for every paper (do not start it with "Kept because").
+
+      {{> json_rules}}
+      Schema:
+      {"screened": [{"paper_id": "p-...", "decision": "keep", "relevance_score": 0.85, "quality_score": 0.7, "reason": "...", "false_friend": null}]}
+
+      Papers:
+      {{candidates_json}}
+
+  knowledge_extract:
+    json_mode: true
+    max_tokens: 2048
+    system: |
+      You extract high-signal evidence cards from a single paper. You see only the title,
+      metadata and abstract, so you must not claim anything that is not stated there.
+    user: |
+      Extract a structured knowledge card for this paper in the context of the research topic.
+
+      Topic: {{topic}}
+      {{domain_guidance}}
+
+      Rules:
+      - problem: the problem the paper addresses.
+      - method: the approach, model or protocol.
+      - data: datasets, cohorts or experimental inputs named in the abstract.
+      - metrics: the evaluation measures named in the abstract.
+      - findings: the key result stated in the abstract (numbers only if the abstract has them).
+      - limitations: limitations the abstract states or clearly implies.
+      - Any field the abstract does not support MUST be null. Do not fill it with generic text.
+
+      {{> json_rules}}
+      Schema:
+      {"problem": "...", "method": "...", "data": null, "metrics": null, "findings": "...", "limitations": null}
+
+      Paper:
+      {{paper_json}}
+
+  synthesis:
+    json_mode: true
+    max_tokens: 8192
+    system: |
+      You are a synthesis specialist for literature reviews. You cluster evidence cards into
+      schools of thought and identify research gaps that the cards actually support.
+    user: |
+      Produce a synthesis (topic clusters, tensions, research gaps) from the knowledge cards.
+
+      Requirements:
+      - At least 2 clusters and at least 2 research gaps.
+      - Every cluster and gap lists the `card_ids` that support it; use only card ids that appear
+        below.
+      - Every gap lists the `sub_question_ids` from the problem tree that it relates to and says
+        why it is prioritised. A gap is a limitation or missing piece visible in the cards, not a
+        generic wish.
+      - Do NOT introduce numbers, effect sizes or counts that are not in the cards.
+      - "prioritized_opportunities" turns gaps into concrete research directions.
+
+      Topic: {{topic}}
+      {{domain_guidance}}
+      Problem tree:
+      {{problem_tree_json}}
+
+      Cards:
+      {{cards_json}}
+
+      {{> json_rules}}
+      Schema:
+      {
+        "overview": "3-sentence synthesis",
+        "clusters": [{"id": "C1", "title": "...", "claim": "...", "card_ids": ["card-p-..."]}],
+        "tensions": [{"between": ["C1", "C2"], "text": "..."}],
+        "gaps": [{"id": "G1", "text": "...", "sub_question_ids": ["SQ1"], "card_ids": ["card-p-..."], "why_prioritized": "...", "priority": 1}],
+        "prioritized_opportunities": [{"gap_id": "G1", "direction": "..."}],
+        "set_aside": [{"id": "A1", "statement": "...", "reason": "..."}]
+      }
+
+  hypothesis_gen:
+    json_mode: true
+    max_tokens: 8192
+    system: |
+      You formulate testable scientific hypotheses that address gaps NOT covered by existing
+      literature. Your hypotheses must be:
+      1. NOVEL: not simply replicating known results or testing obvious things.
+      2. GAP-FILLING: targeted at a specific gap identified in the synthesis.
+      3. FEASIBLE: testable within the stated research constraints.
+      4. FALSIFIABLE: with clear failure conditions that would reject the hypothesis.
+      5. SURPRISING: at least one hypothesis should challenge conventional wisdom or test a
+         counter-intuitive prediction.
+      You synthesise several expert perspectives into a decisive final set; the best synthesis
+      takes the strongest element of each view rather than a compromise, and it preserves genuine
+      disagreement.
+    user: |
+      Write the final set of 2-4 hypotheses.
+
+      Topic: {{topic}}
+      Research constraints: {{constraints}}
+      {{memory_context}}
+      Allowed evidence references (use only these ids): {{valid_refs}}
+      Allowed gap ids: {{valid_gaps}}
+      {{domain_guidance}}
+
+      {{> hypothesis_quality}}
+
+      AVOID: hypotheses that are trivially obvious, that replicate well-known results, or that
+      cannot be tested under the stated constraints.
+
+      {{> hypothesis_schema}}
+
+      Synthesis:
+      {{synthesis_json}}
+
+      Perspectives:
+      {{perspectives}}
+      {{judge_assessment}}
+
+      {{> json_rules}}
+      Return {"hypotheses": [ ... ], "disagreements": ["unresolved disagreement between perspectives", ...]}
+
+sub_prompts:
+  debate_rebuttal:
+    json_mode: true
+    max_tokens: 6144
+    system: |
+      You are participating in a structured research debate as the {{role}} perspective. You have
+      seen the other perspectives. Push back on their weak points, defend or REVISE your own
+      position with evidence, and concede where they are right. Be rigorous, not stubborn.
+    user: |
+      Your previous position ({{role}}):
+      {{own_position}}
+
+      Other perspectives this round:
+      {{others}}
+
+      Allowed evidence references: {{valid_refs}}
+      Allowed gap ids: {{valid_gaps}}
+      Synthesis the hypotheses must stay grounded in:
+      {{synthesis_json}}
+
+      Write your updated position. Keep the same hypothesis schema and keep gap_id and
+      evidence_refs valid.
+      {{> hypothesis_schema}}
+      {{> json_rules}}
+      Return {"hypotheses": [ ... ], "concessions": ["points you conceded", ...]}
+
+  debate_judge:
+    json_mode: true
+    max_tokens: 2048
+    system: |
+      You are an INDEPENDENT judge, distinct from the debating models. Evaluate only; do not
+      rewrite or merge the positions.
+    user: |
+      Score each perspective 1-10 for rigor, evidence and falsifiability, then rank them best
+      first with a one-line reason each.
+
+      {{perspectives}}
+
+      {{> json_rules}}
+      Schema:
+      {"rankings": [{"role": "...", "score": 8, "reason": "..."}]}

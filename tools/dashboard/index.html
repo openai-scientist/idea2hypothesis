@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>idea2hypothesis - run dashboard</title>
+  <meta name="description" content="Developer dashboard for idea2hypothesis runs (stages 1 to 8)." />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js"></script>
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <header class="app-header">
+    <div class="header-container">
+      <div class="brand-section">
+        <div class="brand-logo-icon">I2H</div>
+        <div class="brand-title">idea2hypothesis</div>
+      </div>
+
+      <div class="header-badges">
+        <span class="pill-badge mono" id="header-status">no run</span>
+        <span class="pill-badge mono" id="header-run-id">-</span>
+        <select id="run-select" class="btn" title="Switch run" style="display:none;"></select>
+      </div>
+
+      <div style="display:flex; gap:0.5rem;">
+        <button class="btn" id="btn-export">Export JSON</button>
+        <button class="btn btn-primary" id="btn-open-runner">Run phase 1</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="topic-banner">
+    <div class="topic-banner-container">
+      <div class="topic-text">
+        <span class="topic-tag">Topic</span>
+        <span class="topic-title" id="banner-topic">-</span>
+      </div>
+      <div class="topic-specs">
+        <span>Review mode: <strong id="banner-mode" style="color:var(--text-main);">-</strong></span>
+        <span>Attempt: <strong id="banner-attempt" style="color:var(--text-main);">-</strong></span>
+        <span>Hardware: <strong id="banner-hardware" style="color:var(--text-main);">not recorded</strong></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="stepper-section">
+    <div class="stepper-container">
+      <div class="stepper-track" id="stepper-track"></div>
+    </div>
+  </section>
+
+  <nav class="tabs-nav-bar">
+    <div class="tabs-container">
+      <button class="tab-btn active" data-tab="overview">Overview</button>
+      <button class="tab-btn" data-tab="stages">Stages <span class="badge-counter">1 - 8</span></button>
+      <button class="tab-btn" data-tab="literature">Literature <span class="badge-counter" id="lit-tab-count">0</span></button>
+    </div>
+  </nav>
+
+  <main class="main-wrapper">
+
+    <section class="view-section active" id="view-overview">
+      <div id="run-alert" style="display:none; margin-bottom:1rem;"></div>
+
+      <div class="metrics-row">
+        <div class="metric-card">
+          <div class="metric-label">Candidate papers</div>
+          <div class="metric-value" id="kpi-total-candidates">-</div>
+          <div class="metric-sub" id="kpi-candidates-sub"></div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Shortlisted</div>
+          <div class="metric-value" id="kpi-shortlisted" style="color:#059669;">-</div>
+          <div class="metric-sub" id="kpi-shortlisted-sub"></div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Knowledge cards</div>
+          <div class="metric-value" id="kpi-cards-count">-</div>
+          <div class="metric-sub">one per shortlisted paper</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Hypotheses</div>
+          <div class="metric-value" id="kpi-hypotheses" style="color:#0284c7;">-</div>
+          <div class="metric-sub" id="kpi-novelty-sub"></div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Stage time</div>
+          <div class="metric-value" id="kpi-total-duration">-</div>
+          <div class="metric-sub" id="kpi-usage-sub"></div>
+        </div>
+      </div>
+
+      <div class="charts-grid-minimal">
+        <div class="chart-card-minimal">
+          <div class="chart-header-minimal">
+            <div>
+              <div class="chart-title-minimal">Candidates by publication year</div>
+              <div class="chart-subtitle-minimal">From stage 4 candidates.jsonl</div>
+            </div>
+          </div>
+          <div class="chart-container-minimal"><canvas id="chart-year-dist"></canvas></div>
+        </div>
+        <div class="chart-card-minimal">
+          <div class="chart-header-minimal">
+            <div>
+              <div class="chart-title-minimal">Seconds per stage</div>
+              <div class="chart-subtitle-minimal">From events.jsonl (stage.started to stage.completed)</div>
+            </div>
+          </div>
+          <div class="chart-container-minimal"><canvas id="chart-stage-durations"></canvas></div>
+        </div>
+      </div>
+
+      <div class="table-card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <div>
+            <div style="font-size:0.95rem; font-weight:700; color:var(--text-main);">Most cited shortlisted papers</div>
+            <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px;">Falls back to the candidate pool before stage 5 has run</div>
+          </div>
+          <button class="btn" data-goto="literature">All papers</button>
+        </div>
+        <table class="minimal-table">
+          <thead>
+            <tr>
+              <th style="width:30px;">#</th>
+              <th>Title</th>
+              <th style="width:80px;">Year</th>
+              <th>Venue</th>
+              <th style="width:110px; text-align:right;">Citations</th>
+            </tr>
+          </thead>
+          <tbody id="overview-top-papers-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="view-section" id="view-stages">
+      <div class="stage-split-view">
+        <aside class="stage-menu">
+          <div style="padding:0.4rem 0.75rem; font-size:0.72rem; font-weight:700; color:var(--text-subtle); text-transform:uppercase;">
+            Stages
+          </div>
+          <div id="stage-nav-list"></div>
+        </aside>
+
+        <div class="stage-content-box">
+          <div class="stage-content-header">
+            <div>
+              <div class="stage-content-title" id="stage-view-title">Stage 1</div>
+              <div style="font-size:0.78rem; color:var(--text-muted); margin-top:2px;" id="stage-view-desc"></div>
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+              <span class="pill-badge mono" id="stage-view-status">pending</span>
+              <span class="pill-badge mono" id="stage-view-duration"></span>
+            </div>
+          </div>
+          <div id="stage-view-body"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view-section" id="view-literature">
+      <div class="lit-bar">
+        <div class="lit-search-box">
+          <input type="text" id="lit-search-input" placeholder="Search title, abstract or venue" />
+        </div>
+        <div class="lit-pill-toggles">
+          <button class="lit-pill-btn active" data-mode="shortlist">Shortlist</button>
+          <button class="lit-pill-btn" data-mode="corpus">All candidates</button>
+        </div>
+        <div style="font-size:0.8rem; font-weight:600; color:var(--text-muted);" id="lit-count-label"></div>
+      </div>
+
+      <div id="lit-papers-list"></div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:1rem;">
+        <button class="btn" id="lit-prev-page">Previous</button>
+        <span style="font-size:0.8rem; color:var(--text-muted);" id="lit-page-info"></span>
+        <button class="btn" id="lit-next-page">Next</button>
+      </div>
+    </section>
+
+  </main>
+
+  <div class="modal-overlay" id="paper-modal-overlay">
+    <div class="modal-card">
+      <button class="modal-close" id="modal-close-btn">&times;</button>
+      <div id="paper-modal-body"></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="runner-modal-overlay">
+    <div class="modal-card" style="max-width:640px;">
+      <button class="modal-close" id="runner-close-btn">&times;</button>
+      <div>
+        <div style="font-size:1.1rem; font-weight:700; margin-bottom:0.35rem;">Start a phase 1 run</div>
+        <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:1rem;">
+          Sends <code>POST /api/phase1/start</code> to the idea2hypothesis API (stages 1 to 8).
+          The model credentials and service key stay on the API server; nothing secret is entered here.
+        </p>
+
+        <div style="margin-bottom:0.85rem;">
+          <label for="runner-topic-input" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-main); margin-bottom:0.35rem;">
+            RESEARCH TOPIC
+          </label>
+          <textarea id="runner-topic-input" rows="2" style="width:100%; padding:0.65rem; font-size:0.85rem; border:1px solid var(--border); border-radius:6px; outline:none; font-family:var(--font-sans);" placeholder="Describe the research idea"></textarea>
+        </div>
+
+        <div style="margin-bottom:0.85rem;">
+          <label for="runner-domains-input" style="display:block; font-size:0.75rem; font-weight:700; color:var(--text-main); margin-bottom:0.35rem;">
+            DOMAINS (comma separated, optional)
+          </label>
+          <input id="runner-domains-input" type="text" style="width:100%; padding:0.5rem 0.65rem; font-size:0.85rem; border:1px solid var(--border); border-radius:6px;" />
+        </div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+          <div style="font-size:0.75rem; color:var(--text-muted);">
+            Server: <span id="backend-status-badge" class="pill-badge mono">checking</span>
+          </div>
+          <button class="btn btn-primary" id="btn-start-pipeline">Start</button>
+        </div>
+
+        <div style="background:#0f172a; color:#f8fafc; border-radius:6px; padding:0.85rem; font-family:var(--font-mono); font-size:0.75rem; max-height:180px; overflow-y:auto; line-height:1.45;" id="runner-terminal-box">
+          <div style="color:#94a3b8;">// waiting for a start command</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- data.js is served live by server.py, or generated by build_data.py for static use -->
+  <script>document.write('<script src="data.js' + location.search + '"><\/script>');</script>
+  <script src="app.js"></script>
+</body>
+</html>

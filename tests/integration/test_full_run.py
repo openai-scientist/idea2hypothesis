@@ -1,0 +1,116 @@
+"""Full run 1 -> 8 with fixture LLM and literature."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from idea2hypothesis.pipeline.models import RunStatus
+from idea2hypothesis.pipeline.runner import run_pipeline
+from tests.conftest import make_services, request
+
+SPEC_ARTIFACTS = {
+    1: ["goal.json", "goal.md", "hardware_profile.json"],
+    2: ["problem_tree.json", "problem_tree.md", "topic_evaluation.json"],
+    3: ["search_plan.yaml", "queries.json", "sources.json"],
+    4: ["candidates.jsonl", "references.bib", "search_meta.json"],
+    5: ["shortlist.jsonl", "screen_meta.json", "review.json"],
+    6: ["knowledge_meta.json"],
+    7: ["synthesis.json", "synthesis.md"],
+    8: ["hypotheses.json", "hypotheses.md", "novelty_report.json"],
+}
+
+
+@pytest.fixture
+def auto_services(tmp_path: Path):
+    return make_services(tmp_path, review={"mode": "auto"})
+
+
+async def test_full_run_produces_all_spec_artifacts(auto_services) -> None:
+    result = await run_pipeline(request(), auto_services)
+
+    assert result.status is RunStatus.COMPLETED, result.error
+    assert result.completed_stages == (1, 2, 3, 4, 5, 6, 7, 8)
+
+    run_dir = auto_services.store.run_dir(result.run_id)
+    for name in (
+        "run.json",
+        "config.snapshot.json",
+        "prompts.snapshot.json",
+        "checkpoint.json",
+        "events.jsonl",
+    ):
+        assert (run_dir / name).is_file(), name
+    for stage, names in SPEC_ARTIFACTS.items():
+        for name in names:
+            assert (run_dir / f"stage-{stage:02d}" / name).is_file(), f"stage {stage}: {name}"
+    assert list((run_dir / "stage-06" / "cards").glob("*.json"))
+    assert list((run_dir / "stage-06" / "cards").glob("*.md"))
+    assert list((run_dir / "stage-08" / "perspectives").glob("*.json"))
+    assert (run_dir / "stage-08" / "manifest.json").is_file()
+
+
+async def test_hypotheses_reference_real_gaps_and_cards(auto_services) -> None:
+    result = await run_pipeline(request(), auto_services)
+    art = auto_services.store.artifacts(result.run_id)
+    hypotheses = art.read_json(8, "hypotheses.json")["hypotheses"]
+    gaps = {g["id"] for g in art.read_json(7, "synthesis.json")["gaps"]}
+    cards = {c.stem for c in (art.stage_dir(6) / "cards").glob("*.json")}
+    assert len(hypotheses) >= 2
+    for h in hypotheses:
+        assert h["gap_id"] in gaps
+        assert h["falsification_criteria"]
+        assert set(h["evidence_refs"]) & cards
+
+
+async def test_off_topic_papers_are_rejected_with_reasons(auto_services) -> None:
+    result = await run_pipeline(request(), auto_services)
+    art = auto_services.store.artifacts(result.run_id)
+    review = art.read_json(5, "review.json")
+    rejected = [d for d in review["decisions"] if d["decision"] == "rejected"]
+    assert len(rejected) == 3
+    assert all(d["reason"] and d["false_friend"] == "sleep" for d in rejected)
+    shortlist_ids = {r["paper_id"] for r in art.read_jsonl(5, "shortlist.jsonl")}
+    assert not shortlist_ids & {d["paper_id"] for d in rejected}
+
+
+async def test_events_are_sequenced_and_complete(auto_services) -> None:
+    result = await run_pipeline(request(), auto_services)
+    events = auto_services.store.read_events(result.run_id)
+    assert [e.seq for e in events] == list(range(1, len(events) + 1))
+    types = [e.type for e in events]
+    assert types[0] == "run.started" and types[-1] == "run.completed"
+    assert types.count("stage.started") == 8 and types.count("stage.completed") == 8
+    raw = [
+        json.loads(line)
+        for line in (auto_services.store.run_dir(result.run_id) / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert {
+        "schema_version",
+        "run_id",
+        "seq",
+        "stage",
+        "type",
+        "timestamp",
+        "attempt",
+        "data",
+    } <= set(raw[0])
+
+
+async def test_usage_is_tracked_and_cost_absent_without_pricing(auto_services) -> None:
+    result = await run_pipeline(request(), auto_services)
+    assert result.usage["calls"] > 5
+    assert result.usage["prompt_tokens"] > 0
+    assert result.usage["cost_usd"] is None
+
+
+async def test_cost_is_reported_when_responses_are_priced(tmp_path: Path) -> None:
+    from tests.fixtures import FixtureLLM
+
+    services = make_services(tmp_path, llm=FixtureLLM(cost_per_call=0.01), review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+    assert result.usage["cost_usd"] == pytest.approx(0.01 * result.usage["calls"])

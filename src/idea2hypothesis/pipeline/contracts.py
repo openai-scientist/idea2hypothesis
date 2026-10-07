@@ -1,0 +1,719 @@
+"""Per-stage input/output contracts and validators.
+
+Validators come in two forms that share the same rules:
+
+* ``check_*`` functions validate the parsed JSON of one artifact (used by stages to ask the
+  model to repair an invalid answer before anything is written);
+* ``validate_stage`` validates the artifacts of a stage on disk (used after a stage runs, on
+  resume, and when an artifact is edited through the API).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from difflib import SequenceMatcher
+from typing import Any
+
+import yaml
+
+from idea2hypothesis.pipeline.models import Stage
+from idea2hypothesis.storage.artifacts import ArtifactStore
+
+SCHEMA_VERSION = 1
+PREDICTIONS = ("> 0", "< 0", "≠ 0")
+EVIDENCE_SCOPES = ("abstract", "full_text")
+DECISIONS = ("kept", "rejected", "unscored", "prefiltered", "dropped_by_reviewer")
+CARD_FIELDS = ("problem", "method", "data", "metrics", "findings", "limitations")
+CARD_CONTENT_FIELDS = ("problem", "method", "findings", "limitations")
+MIN_SUB_QUESTIONS = 3
+MIN_STRATEGIES = 2
+MIN_GAPS = 2
+MIN_HYPOTHESES = 2
+_CONDITION_WORDS = re.compile(
+    r"\b(if|when|unless|exceed\w*|below|above|less|greater|fail\w*|interval|threshold|bound|limit"
+    r"|zero|ci)\b|[<>=≥≤≠]|\d",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class Findings:
+    """Collected problems: ``errors`` fail the stage, ``warnings`` are advisory."""
+
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def error(self, message: str) -> None:
+        self.errors.append(message)
+
+    def warn(self, message: str) -> None:
+        self.warnings.append(message)
+
+    def require(self, condition: object, message: str) -> bool:
+        if not condition:
+            self.errors.append(message)
+        return bool(condition)
+
+    def extend(self, other: Findings) -> None:
+        self.errors.extend(other.errors)
+        self.warnings.extend(other.warnings)
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+def _text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _str_list(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(_text(v) for v in value)
+
+
+def _normalise_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9 ]", "", re.sub(r"\s+", " ", value.lower())).strip()
+
+
+def card_id_for(paper_id: str) -> str:
+    return f"card-{paper_id}"
+
+
+# ---------------------------------------------------------------------------
+# JSON-level checks (shared by stages and file validation)
+# ---------------------------------------------------------------------------
+
+
+def check_goal(goal: Any) -> Findings:
+    f = Findings()
+    if not f.require(isinstance(goal, dict), "goal must be a JSON object"):
+        return f
+    if not f.require(
+        isinstance(goal.get("researchable"), bool), "goal.researchable must be a boolean"
+    ):
+        return f
+    if not goal["researchable"]:
+        f.require(_text(goal.get("rejection_reason")), "a rejected topic needs a rejection_reason")
+        return f
+    for key in ("working_title", "problem", "objective", "scope"):
+        f.require(_text(goal.get(key)), f"goal.{key} is required")
+    f.require(
+        _str_list(goal.get("success_criteria")), "goal.success_criteria needs at least one entry"
+    )
+    f.require(
+        isinstance(goal.get("constraints", []), list), "goal.constraints must be a list of strings"
+    )
+    return f
+
+
+def check_problem_tree(tree: Any) -> Findings:
+    f = Findings()
+    if not f.require(isinstance(tree, dict), "problem tree must be a JSON object"):
+        return f
+    questions = tree.get("sub_questions")
+    if not f.require(
+        isinstance(questions, list) and len(questions) >= MIN_SUB_QUESTIONS,
+        f"at least {MIN_SUB_QUESTIONS} prioritised sub-questions are required",
+    ):
+        return f
+    seen: set[str] = set()
+    for i, q in enumerate(questions):
+        if not f.require(isinstance(q, dict), f"sub_questions[{i}] must be an object"):
+            continue
+        qid = q.get("id")
+        if f.require(_text(qid), f"sub_questions[{i}].id is required"):
+            f.require(qid not in seen, f"duplicate sub-question id {qid}")
+            seen.add(str(qid))
+        f.require(_text(q.get("text")), f"sub_questions[{i}].text is required")
+        f.require(_text(q.get("goal_link")), f"sub_questions[{i}].goal_link is required")
+        f.require(
+            isinstance(q.get("priority"), int) and not isinstance(q.get("priority"), bool),
+            f"sub_questions[{i}].priority must be an integer",
+        )
+    return f
+
+
+def check_topic_evaluation(evaluation: Any) -> Findings:
+    f = Findings()
+    if not f.require(isinstance(evaluation, dict), "topic evaluation must be a JSON object"):
+        return f
+    for key in ("novelty", "specificity", "feasibility", "overall"):
+        value = evaluation.get(key)
+        f.require(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 10,
+            f"topic_evaluation.{key} must be a number between 0 and 10",
+        )
+    return f
+
+
+def sub_question_ids(tree: dict[str, Any]) -> set[str]:
+    return {
+        str(q["id"]) for q in tree.get("sub_questions", []) if isinstance(q, dict) and "id" in q
+    }
+
+
+def check_search_plan(plan: Any, known_sq: set[str]) -> Findings:
+    f = Findings()
+    if not f.require(isinstance(plan, dict), "search plan must be an object"):
+        return f
+    strategies = plan.get("search_strategies")
+    if not f.require(
+        isinstance(strategies, list) and len(strategies) >= MIN_STRATEGIES,
+        f"at least {MIN_STRATEGIES} search strategies are required",
+    ):
+        return f
+    for i, strategy in enumerate(strategies):
+        if not f.require(isinstance(strategy, dict), f"search_strategies[{i}] must be an object"):
+            continue
+        f.require(_text(strategy.get("name")), f"search_strategies[{i}].name is required")
+        f.require(
+            _str_list(strategy.get("queries")), f"search_strategies[{i}] needs non-empty queries"
+        )
+        ids = strategy.get("sub_question_ids")
+        if f.require(_str_list(ids), f"search_strategies[{i}] must list sub_question_ids"):
+            unknown = sorted(set(ids) - known_sq)
+            f.require(
+                not unknown, f"search_strategies[{i}] references unknown sub-questions {unknown}"
+            )
+    return f
+
+
+def check_queries(queries: Any, known_sq: set[str]) -> Findings:
+    f = Findings()
+    if not f.require(isinstance(queries, dict), "queries.json must be an object"):
+        return f
+    rows = queries.get("queries")
+    if not f.require(isinstance(rows, list) and rows, "queries.json needs at least one query"):
+        return f
+    for i, row in enumerate(rows):
+        if not f.require(isinstance(row, dict), f"queries[{i}] must be an object"):
+            continue
+        f.require(_text(row.get("text")), f"queries[{i}].text is required")
+        f.require(_text(row.get("strategy")), f"queries[{i}].strategy is required")
+        ids = row.get("sub_question_ids")
+        if f.require(_str_list(ids), f"queries[{i}] must be linked to sub-questions"):
+            f.require(set(ids) <= known_sq, f"queries[{i}] references unknown sub-questions")
+    return f
+
+
+def check_candidates(rows: list[dict[str, Any]]) -> Findings:
+    f = Findings()
+    if not f.require(rows, "no candidate papers were collected"):
+        return f
+    ids: set[str] = set()
+    identities: set[str] = set()
+    for i, row in enumerate(rows):
+        pid = row.get("paper_id")
+        if f.require(_text(pid), f"candidates[{i}].paper_id is required"):
+            f.require(pid not in ids, f"duplicate paper_id {pid}")
+            ids.add(str(pid))
+        f.require(_text(row.get("title")), f"candidates[{i}].title is required")
+        records = row.get("source_records")
+        if f.require(
+            isinstance(records, list) and records,
+            f"candidates[{i}] has no source_records (provenance)",
+        ):
+            for record in records:
+                f.require(
+                    isinstance(record, dict)
+                    and _text(record.get("provider"))
+                    and _text(record.get("source_id"))
+                    and _text(record.get("retrieved_at")),
+                    f"candidates[{i}] has an incomplete source record",
+                )
+        for key in (
+            str(row.get("doi") or "").lower(),
+            str(row.get("arxiv_id") or ""),
+            _normalise_text(str(row.get("title", ""))),
+        ):
+            if key:
+                f.require(key not in identities, f"candidates contain a duplicate of {key[:60]!r}")
+                identities.add(key)
+    return f
+
+
+def check_screen(
+    candidates: list[dict[str, Any]],
+    shortlist: list[dict[str, Any]],
+    review: Any,
+) -> Findings:
+    f = Findings()
+    candidate_ids = {str(c["paper_id"]) for c in candidates}
+    f.require(shortlist, "the shortlist is empty")
+    shortlist_ids = [str(r.get("paper_id")) for r in shortlist]
+    f.require(len(set(shortlist_ids)) == len(shortlist_ids), "shortlist contains duplicate papers")
+    for row in shortlist:
+        pid = row.get("paper_id")
+        f.require(pid in candidate_ids, f"shortlisted paper {pid} is not a collected candidate")
+        for key in ("relevance_score", "quality_score"):
+            value = row.get(key)
+            f.require(
+                isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 1,
+                f"shortlist paper {pid}: {key} must be in [0, 1]",
+            )
+        f.require(_text(row.get("keep_reason")), f"shortlist paper {pid}: keep_reason is required")
+    if not f.require(isinstance(review, dict), "review.json must be an object"):
+        return f
+    decisions = review.get("decisions")
+    if not f.require(isinstance(decisions, list), "review.json needs a decisions list"):
+        return f
+    by_id = {str(d.get("paper_id")): d for d in decisions if isinstance(d, dict)}
+    f.require(candidate_ids <= set(by_id), "review.json does not account for every candidate")
+    kept = {pid for pid, d in by_id.items() if d.get("decision") == "kept"}
+    f.require(kept == set(shortlist_ids), "review.json kept papers differ from the shortlist")
+    for pid, d in by_id.items():
+        f.require(d.get("decision") in DECISIONS, f"review decision for {pid} is invalid")
+        f.require(_text(d.get("reason")), f"review decision for {pid} has no reason")
+        if d.get("decision") in ("unscored", "prefiltered"):
+            f.require(
+                d.get("relevance_score") is None and d.get("quality_score") is None,
+                f"{pid} was not scored and must not carry scores",
+            )
+    return f
+
+
+def check_card(card: Any, shortlist_ids: set[str]) -> Findings:
+    f = Findings()
+    if not f.require(isinstance(card, dict), "card must be an object"):
+        return f
+    cid = card.get("card_id")
+    pid = card.get("paper_id")
+    f.require(
+        _text(cid) and cid == card_id_for(str(pid)), f"card {cid}: card_id must be card-<paper_id>"
+    )
+    f.require(pid in shortlist_ids, f"card {cid}: paper {pid} is not in the shortlist")
+    f.require(
+        card.get("evidence_scope") in EVIDENCE_SCOPES,
+        f"card {cid}: evidence_scope must be one of {list(EVIDENCE_SCOPES)}",
+    )
+    for key in CARD_FIELDS:
+        present = key in card and (card[key] is None or _text(card[key]))
+        f.require(present, f"card {cid}: field {key} must be text or null")
+    return f
+
+
+def check_synthesis(
+    synthesis: Any, known_sq: set[str], known_cards: set[str], source_text: str = ""
+) -> Findings:
+    f = Findings()
+    if not f.require(isinstance(synthesis, dict), "synthesis must be an object"):
+        return f
+    clusters = synthesis.get("clusters")
+    if f.require(isinstance(clusters, list) and clusters, "at least one cluster is required"):
+        for i, cluster in enumerate(clusters):
+            ok = (
+                isinstance(cluster, dict)
+                and _text(cluster.get("id"))
+                and _text(cluster.get("title"))
+            )
+            if not f.require(ok, f"clusters[{i}] needs id and title"):
+                continue
+            ids = cluster.get("card_ids")
+            if f.require(_str_list(ids), f"clusters[{i}] needs card_ids"):
+                f.require(set(ids) <= known_cards, f"clusters[{i}] references unknown cards")
+    gaps = synthesis.get("gaps")
+    if f.require(
+        isinstance(gaps, list) and len(gaps) >= MIN_GAPS,
+        f"at least {MIN_GAPS} research gaps are required",
+    ):
+        seen: set[str] = set()
+        for i, gap in enumerate(gaps):
+            if not f.require(isinstance(gap, dict), f"gaps[{i}] must be an object"):
+                continue
+            if f.require(_text(gap.get("id")), f"gaps[{i}].id is required"):
+                f.require(gap["id"] not in seen, f"duplicate gap id {gap['id']}")
+                seen.add(str(gap["id"]))
+            f.require(_text(gap.get("text")), f"gaps[{i}].text is required")
+            sq = gap.get("sub_question_ids")
+            if f.require(_str_list(sq), f"gaps[{i}] must reference sub-questions"):
+                f.require(set(sq) <= known_sq, f"gaps[{i}] references unknown sub-questions")
+            ids = gap.get("card_ids")
+            if f.require(_str_list(ids), f"gaps[{i}] must be connected to evidence cards"):
+                f.require(set(ids) <= known_cards, f"gaps[{i}] references unknown cards")
+    if source_text:
+        text = json.dumps(synthesis, ensure_ascii=False)
+        for number in unsupported_numbers(text, source_text)[:5]:
+            f.warn(f"synthesis mentions {number!r} which does not appear in any card")
+    return f
+
+
+def normalise_prediction(value: Any) -> Any:
+    """Map common spellings of the three allowed predictions to their canonical form."""
+    if not isinstance(value, str):
+        return value
+    compact = re.sub(r"\s+", "", value)
+    mapping = {">0": "> 0", "<0": "< 0", "≠0": "≠ 0", "!=0": "≠ 0", "=/=0": "≠ 0"}
+    return mapping.get(compact, value)
+
+
+def check_hypotheses(data: Any, valid_gaps: set[str], valid_refs: set[str]) -> Findings:
+    """Validate the hypothesis list (``data`` is the parsed ``hypotheses.json`` object)."""
+    f = Findings()
+    if not f.require(isinstance(data, dict), "hypotheses output must be an object"):
+        return f
+    items = data.get("hypotheses")
+    if not f.require(
+        isinstance(items, list) and len(items) >= MIN_HYPOTHESES,
+        f"at least {MIN_HYPOTHESES} hypotheses are required",
+    ):
+        return f
+    ids: set[str] = set()
+    for i, h in enumerate(items):
+        if not f.require(isinstance(h, dict), f"hypotheses[{i}] must be an object"):
+            continue
+        hid = h.get("id")
+        if f.require(_text(hid), f"hypotheses[{i}].id is required"):
+            f.require(hid not in ids, f"duplicate hypothesis id {hid}")
+            ids.add(str(hid))
+        tag = f"hypothesis {hid or i}"
+        for key in ("statement", "outcome", "rationale", "novelty"):
+            f.require(_text(h.get(key)), f"{tag}: {key} is required")
+        f.require(
+            h.get("gap_id") in valid_gaps, f"{tag}: gap_id must be one of {sorted(valid_gaps)}"
+        )
+        refs = h.get("evidence_refs")
+        if f.require(_str_list(refs), f"{tag}: evidence_refs needs at least one reference"):
+            unknown = sorted(set(refs) - valid_refs)
+            f.require(not unknown, f"{tag}: evidence_refs {unknown} do not resolve")
+        f.require(
+            h.get("prediction") in PREDICTIONS,
+            f"{tag}: prediction must be one of {list(PREDICTIONS)}",
+        )
+        crit = h.get("falsification_criteria")
+        if f.require(_text(crit), f"{tag}: falsification_criteria is required"):
+            f.require(
+                len(crit.strip()) >= 25 and _CONDITION_WORDS.search(crit),
+                f"{tag}: falsification_criteria must state a concrete failing observation",
+            )
+        lim = h.get("limitations")
+        f.require(_text(lim) or _str_list(lim), f"{tag}: limitations are required")
+    _check_distinct(f, items, "novelty")
+    _check_distinct(f, items, "rationale")
+    predictions = [h.get("prediction") for h in items if isinstance(h, dict)]
+    if len(predictions) >= 3 and len(set(predictions)) == 1:
+        f.warn("all hypotheses predict the same direction; consider costs or interactions")
+    return f
+
+
+def _check_distinct(f: Findings, items: list[Any], key: str) -> None:
+    texts = [
+        (h.get("id"), _normalise_text(str(h.get(key, "")))) for h in items if isinstance(h, dict)
+    ]
+    for i in range(len(texts)):
+        for j in range(i + 1, len(texts)):
+            (a_id, a), (b_id, b) = texts[i], texts[j]
+            if a and b and (a == b or SequenceMatcher(None, a, b).ratio() >= 0.92):
+                f.error(f"hypotheses {a_id} and {b_id} repeat the same {key} text")
+
+
+def unsupported_numbers(text: str, source_text: str) -> list[str]:
+    """Numeric tokens in ``text`` (other than single digits) absent from ``source_text``."""
+    pattern = re.compile(r"(?<![\w.])\d+(?:\.\d+)?%?(?![\w])")
+    known = set(pattern.findall(source_text))
+    seen: list[str] = []
+    for token in pattern.findall(text):
+        bare = token.rstrip("%")
+        if token in known or bare in known or (bare.isdigit() and len(bare) == 1):
+            continue
+        if token not in seen:
+            seen.append(token)
+    return seen
+
+
+# ---------------------------------------------------------------------------
+# Contracts
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StageContract:
+    stage: Stage
+    inputs: tuple[tuple[Stage, str], ...]
+    outputs: tuple[str, ...]
+    dod: str
+    error_code: str
+
+
+CONTRACTS: dict[Stage, StageContract] = {
+    Stage.TOPIC_INIT: StageContract(
+        Stage.TOPIC_INIT,
+        (),
+        ("goal.json", "goal.md"),
+        "Problem, objective, scope and success criteria; topic judged researchable",
+        "INVALID_GOAL",
+    ),
+    Stage.PROBLEM_DECOMPOSE: StageContract(
+        Stage.PROBLEM_DECOMPOSE,
+        ((Stage.TOPIC_INIT, "goal.json"),),
+        ("problem_tree.json", "problem_tree.md", "topic_evaluation.json"),
+        ">=3 prioritised sub-questions linked to the goal; valid topic scores",
+        "INVALID_PROBLEM_TREE",
+    ),
+    Stage.SEARCH_STRATEGY: StageContract(
+        Stage.SEARCH_STRATEGY,
+        ((Stage.PROBLEM_DECOMPOSE, "problem_tree.json"),),
+        ("search_plan.yaml", "queries.json", "sources.json"),
+        ">=2 strategies with non-empty queries linked to sub-questions",
+        "INVALID_SEARCH_PLAN",
+    ),
+    Stage.LITERATURE_COLLECT: StageContract(
+        Stage.LITERATURE_COLLECT,
+        ((Stage.SEARCH_STRATEGY, "queries.json"),),
+        ("candidates.jsonl", "references.bib", "search_meta.json"),
+        "Real, deduplicated papers with provenance; per-source errors recorded",
+        "NO_LITERATURE",
+    ),
+    Stage.LITERATURE_SCREEN: StageContract(
+        Stage.LITERATURE_SCREEN,
+        ((Stage.LITERATURE_COLLECT, "candidates.jsonl"),),
+        ("shortlist.jsonl", "screen_meta.json", "review.json"),
+        "Every paper has a decision, reason and (when scored) relevance/quality; "
+        "non-empty shortlist",
+        "EMPTY_SHORTLIST",
+    ),
+    Stage.KNOWLEDGE_EXTRACT: StageContract(
+        Stage.KNOWLEDGE_EXTRACT,
+        ((Stage.LITERATURE_SCREEN, "shortlist.jsonl"),),
+        ("knowledge_meta.json",),
+        "One evidence card per shortlisted paper with unknown fields marked null",
+        "INVALID_CARDS",
+    ),
+    Stage.SYNTHESIS: StageContract(
+        Stage.SYNTHESIS,
+        ((Stage.KNOWLEDGE_EXTRACT, "knowledge_meta.json"),),
+        ("synthesis.json", "synthesis.md"),
+        "Clusters and >=2 gaps linked to sub-questions and cards",
+        "INVALID_SYNTHESIS",
+    ),
+    Stage.HYPOTHESIS_GEN: StageContract(
+        Stage.HYPOTHESIS_GEN,
+        ((Stage.SYNTHESIS, "synthesis.json"),),
+        ("hypotheses.json", "hypotheses.md"),
+        ">=2 falsifiable hypotheses with gap, evidence references and falsification criteria",
+        "INVALID_HYPOTHESES",
+    ),
+}
+
+
+def missing_inputs(stage: Stage, artifacts: ArtifactStore) -> list[str]:
+    """Upstream artifacts the stage needs that are absent."""
+    return [
+        f"stage-{int(src):02d}/{name}"
+        for src, name in CONTRACTS[stage].inputs
+        if not artifacts.exists(int(src), name)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Loading helpers for on-disk validation
+# ---------------------------------------------------------------------------
+
+
+class _Loader:
+    def __init__(self, art: ArtifactStore, f: Findings) -> None:
+        self.art = art
+        self.f = f
+
+    def json(self, stage: Stage, name: str) -> Any:
+        try:
+            return self.art.read_json(int(stage), name)
+        except (OSError, ValueError):
+            self.f.error(f"stage {int(stage)}: {name} is missing or not valid JSON")
+            return None
+
+    def jsonl(self, stage: Stage, name: str) -> list[dict[str, Any]]:
+        try:
+            return self.art.read_jsonl(int(stage), name)
+        except (OSError, ValueError):
+            self.f.error(f"stage {int(stage)}: {name} is missing or not valid JSONL")
+            return []
+
+    def exists(self, stage: Stage, name: str) -> bool:
+        ok = self.art.exists(int(stage), name)
+        if not ok:
+            self.f.error(f"stage {int(stage)}: {name} is missing")
+        return ok
+
+
+def _tree_ids(ld: _Loader) -> set[str]:
+    tree = ld.json(Stage.PROBLEM_DECOMPOSE, "problem_tree.json")
+    return sub_question_ids(tree) if isinstance(tree, dict) else set()
+
+
+def _card_rows(ld: _Loader) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    stage = int(Stage.KNOWLEDGE_EXTRACT)
+    for name in ld.art.list_files(stage):
+        if name.startswith("cards/") and name.endswith(".json"):
+            try:
+                rows.append(ld.art.read_json(stage, name))
+            except (OSError, ValueError):
+                ld.f.error(f"stage {stage}: {name} is not valid JSON")
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# On-disk validation per stage
+# ---------------------------------------------------------------------------
+
+
+def _v_topic_init(ld: _Loader, f: Findings) -> None:
+    goal = ld.json(Stage.TOPIC_INIT, "goal.json")
+    if goal is not None:
+        f.extend(check_goal(goal))
+    ld.exists(Stage.TOPIC_INIT, "goal.md")
+    if ld.art.exists(1, "hardware_profile.json"):
+        f.require(
+            isinstance(ld.json(Stage.TOPIC_INIT, "hardware_profile.json"), dict),
+            "hardware_profile.json must be an object",
+        )
+
+
+def _v_problem_decompose(ld: _Loader, f: Findings) -> None:
+    tree = ld.json(Stage.PROBLEM_DECOMPOSE, "problem_tree.json")
+    if tree is not None:
+        f.extend(check_problem_tree(tree))
+    evaluation = ld.json(Stage.PROBLEM_DECOMPOSE, "topic_evaluation.json")
+    if evaluation is not None:
+        f.extend(check_topic_evaluation(evaluation))
+    ld.exists(Stage.PROBLEM_DECOMPOSE, "problem_tree.md")
+
+
+def _v_search_strategy(ld: _Loader, f: Findings) -> None:
+    known = _tree_ids(ld)
+    try:
+        plan = yaml.safe_load(ld.art.read_text(int(Stage.SEARCH_STRATEGY), "search_plan.yaml"))
+    except (OSError, yaml.YAMLError):
+        f.error("stage 3: search_plan.yaml is missing or invalid YAML")
+        plan = None
+    if plan is not None:
+        f.extend(check_search_plan(plan, known))
+    queries = ld.json(Stage.SEARCH_STRATEGY, "queries.json")
+    if queries is not None:
+        f.extend(check_queries(queries, known))
+    sources = ld.json(Stage.SEARCH_STRATEGY, "sources.json")
+    if sources is not None:
+        f.require(
+            isinstance(sources, dict)
+            and isinstance(sources.get("sources"), list)
+            and sources["sources"],
+            "sources.json needs a non-empty sources list",
+        )
+
+
+def _v_literature_collect(ld: _Loader, f: Findings) -> None:
+    rows = ld.jsonl(Stage.LITERATURE_COLLECT, "candidates.jsonl")
+    f.extend(check_candidates(rows))
+    meta = ld.json(Stage.LITERATURE_COLLECT, "search_meta.json")
+    if meta is not None:
+        f.require(
+            isinstance(meta, dict) and isinstance(meta.get("per_source"), dict),
+            "search_meta.json must record per-source results",
+        )
+    if ld.exists(Stage.LITERATURE_COLLECT, "references.bib") and rows:
+        bib = ld.art.read_text(int(Stage.LITERATURE_COLLECT), "references.bib")
+        f.require(
+            len(re.findall(r"^@\w+\{", bib, re.MULTILINE)) == len(rows),
+            "references.bib entries do not match the candidates",
+        )
+
+
+def _v_literature_screen(ld: _Loader, f: Findings) -> None:
+    candidates = ld.jsonl(Stage.LITERATURE_COLLECT, "candidates.jsonl")
+    shortlist = ld.jsonl(Stage.LITERATURE_SCREEN, "shortlist.jsonl")
+    review = ld.json(Stage.LITERATURE_SCREEN, "review.json")
+    ld.json(Stage.LITERATURE_SCREEN, "screen_meta.json")
+    if review is not None:
+        f.extend(check_screen(candidates, shortlist, review))
+
+
+def _v_knowledge_extract(ld: _Loader, f: Findings) -> None:
+    shortlist = ld.jsonl(Stage.LITERATURE_SCREEN, "shortlist.jsonl")
+    ids = {str(r["paper_id"]) for r in shortlist}
+    cards = _card_rows(ld)
+    if not f.require(cards, "no knowledge cards were produced"):
+        return
+    seen_papers: set[str] = set()
+    for card in cards:
+        f.extend(check_card(card, ids))
+        pid = str(card.get("paper_id"))
+        f.require(pid not in seen_papers, f"more than one card for paper {pid}")
+        seen_papers.add(pid)
+        f.require(
+            ld.art.exists(int(Stage.KNOWLEDGE_EXTRACT), f"cards/{card.get('card_id')}.md"),
+            f"card {card.get('card_id')} has no markdown rendering",
+        )
+    ld.json(Stage.KNOWLEDGE_EXTRACT, "knowledge_meta.json")
+
+
+def card_source_text(cards: Iterable[dict[str, Any]]) -> str:
+    return " ".join(str(v) for c in cards for k, v in c.items() if k in CARD_FIELDS and v)
+
+
+def _v_synthesis(ld: _Loader, f: Findings) -> None:
+    synthesis = ld.json(Stage.SYNTHESIS, "synthesis.json")
+    ld.exists(Stage.SYNTHESIS, "synthesis.md")
+    if synthesis is None:
+        return
+    cards = _card_rows(ld)
+    card_ids = {str(c.get("card_id")) for c in cards}
+    f.extend(check_synthesis(synthesis, _tree_ids(ld), card_ids, card_source_text(cards)))
+
+
+def hypothesis_reference_sets(
+    synthesis: dict[str, Any], cards: Iterable[dict[str, Any]]
+) -> tuple[set[str], set[str]]:
+    """``(valid_gap_ids, valid_evidence_refs)``: gap ids, card ids and shortlisted paper ids."""
+    gaps = {str(g["id"]) for g in synthesis.get("gaps", []) if isinstance(g, dict) and "id" in g}
+    refs: set[str] = set()
+    for card in cards:
+        refs.add(str(card.get("card_id")))
+        refs.add(str(card.get("paper_id")))
+    return gaps, refs
+
+
+def _v_hypothesis_gen(ld: _Loader, f: Findings) -> None:
+    synthesis = ld.json(Stage.SYNTHESIS, "synthesis.json")
+    data = ld.json(Stage.HYPOTHESIS_GEN, "hypotheses.json")
+    ld.exists(Stage.HYPOTHESIS_GEN, "hypotheses.md")
+    stage = int(Stage.HYPOTHESIS_GEN)
+    f.require(
+        any(n.startswith("perspectives/") for n in ld.art.list_files(stage)),
+        "perspectives/ contains no perspective outputs",
+    )
+    if synthesis is None or data is None:
+        return
+    gaps, refs = hypothesis_reference_sets(synthesis, _card_rows(ld))
+    f.extend(check_hypotheses(data, gaps, refs))
+    if ld.art.exists(stage, "novelty_report.json"):
+        report = ld.json(Stage.HYPOTHESIS_GEN, "novelty_report.json")
+        f.require(
+            isinstance(report, dict) and report.get("kind") == "novelty_assessment",
+            "novelty_report.json must be labelled as a novelty assessment",
+        )
+
+
+_VALIDATORS: dict[Stage, Callable[[_Loader, Findings], None]] = {
+    Stage.TOPIC_INIT: _v_topic_init,
+    Stage.PROBLEM_DECOMPOSE: _v_problem_decompose,
+    Stage.SEARCH_STRATEGY: _v_search_strategy,
+    Stage.LITERATURE_COLLECT: _v_literature_collect,
+    Stage.LITERATURE_SCREEN: _v_literature_screen,
+    Stage.KNOWLEDGE_EXTRACT: _v_knowledge_extract,
+    Stage.SYNTHESIS: _v_synthesis,
+    Stage.HYPOTHESIS_GEN: _v_hypothesis_gen,
+}
+
+
+def validate_stage(stage: Stage, artifacts: ArtifactStore) -> Findings:
+    """Validate the on-disk artifacts of ``stage`` against its contract."""
+    findings = Findings()
+    loader = _Loader(artifacts, findings)
+    for name in CONTRACTS[stage].outputs:
+        loader.exists(stage, name)
+    if findings.ok:
+        _VALIDATORS[stage](loader, findings)
+    return findings
