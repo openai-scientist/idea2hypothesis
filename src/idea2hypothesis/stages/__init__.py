@@ -1,4 +1,4 @@
-"""The eight stage implementations; each module exposes ``async run(ctx) -> list[str]``."""
+"""The stage implementations; each module exposes ``async run(ctx) -> list[str]``."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 
 from idea2hypothesis.pipeline.models import Stage, StageContext
 from idea2hypothesis.stages import (
+    argument_map,
     hypothesis_gen,
     knowledge_extract,
     literature_collect,
@@ -27,6 +28,7 @@ STAGE_RUNNERS: dict[Stage, StageFn] = {
     Stage.KNOWLEDGE_EXTRACT: knowledge_extract.run,
     Stage.SYNTHESIS: synthesis.run,
     Stage.HYPOTHESIS_GEN: hypothesis_gen.run,
+    Stage.ARGUMENT_MAP: argument_map.run,
 }
 
 __all__ = ["STAGE_RUNNERS", "StageFn"]

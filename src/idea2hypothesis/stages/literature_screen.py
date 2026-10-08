@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -118,7 +119,26 @@ def check_screen_batch(data: Any, expected: set[str]) -> Findings:
     return f
 
 
+def _batch_name(batch: list[dict[str, Any]]) -> str:
+    """Partial-result file of a batch, keyed by its papers (another batch never reuses it)."""
+    ids = "\n".join(str(r["paper_id"]) for r in batch)
+    return f"batch-{hashlib.sha256(ids.encode('utf-8')).hexdigest()[:16]}.json"
+
+
 async def _screen_batch(
+    ctx: StageContext, batch: list[dict[str, Any]], index: int
+) -> dict[str, dict[str, Any]]:
+    """Scores of one batch; a batch already scored in this attempt (before a pause) is reused."""
+    name = _batch_name(batch)
+    cached = ctx.artifacts.read_partial(STAGE, ctx.attempt, name)
+    if isinstance(cached, dict):
+        return cached
+    scored = await _request_batch(ctx, batch, index)
+    ctx.artifacts.write_partial(STAGE, ctx.attempt, name, scored)
+    return scored
+
+
+async def _request_batch(
     ctx: StageContext, batch: list[dict[str, Any]], index: int
 ) -> dict[str, dict[str, Any]]:
     research = ctx.config.research
@@ -174,6 +194,20 @@ def _decision(
     }
 
 
+def _prefiltered(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "paper_id": str(row["paper_id"]), "title": row.get("title", ""),
+        "year": row.get("year") or None, "venue": row.get("venue") or None,
+        "relevance_score": None, "quality_score": None, "false_friend": None,
+        "decision": "prefiltered",
+        "reason": "no keyword overlap with the topic or domains; not sent to the reviewer",
+    }  # fmt: skip
+
+
+def _cut_reason(reason: str, cap: int) -> str:
+    return f"{reason} (cleared both bars but ranked below the {cap} best-scored papers kept)"
+
+
 async def run(ctx: StageContext) -> list[str]:
     candidates = ctx.artifacts.read_jsonl(4, "candidates.jsonl")
     research = ctx.config.research
@@ -184,8 +218,31 @@ async def run(ctx: StageContext) -> list[str]:
         to_screen, dropped, bypassed = list(candidates), [], True
 
     batches = make_batches(to_screen)
+    await ctx.progress(
+        "screen_plan",
+        candidates=len(candidates),
+        to_screen=len(to_screen),
+        batches=len(batches),
+        prefiltered=[_prefiltered(r) for r in dropped],
+        rules=SCREEN_RULES,
+        min_relevance=research.min_relevance,
+        min_quality=research.min_quality,
+    )
+    done = 0
+
+    async def screen(index: int, batch: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        nonlocal done
+        scored = await _screen_batch(ctx, batch, index)
+        done += 1
+        # Decisions against the bars; whether a paper makes the capped shortlist is only known
+        # once every batch is in, so kept papers are announced with the shortlist.
+        bars = (research.min_relevance, research.min_quality)
+        rows = [_decision(r, scored.get(str(r["paper_id"])), *bars) for r in batch]
+        await ctx.progress("screen_batch", index=done, total=len(batches), decisions=rows)
+        return scored
+
     results = await gather_limited(
-        [lambda i=i, b=b: _screen_batch(ctx, b, i) for i, b in enumerate(batches)],
+        [lambda i=i, b=b: screen(i, b) for i, b in enumerate(batches)],
         ctx.config.runtime.concurrency,
     )
     scored: dict[str, dict[str, Any]] = {}
@@ -199,16 +256,7 @@ async def run(ctx: StageContext) -> list[str]:
     for row in candidates:
         pid = str(row["paper_id"])
         if pid in dropped_ids:
-            decisions.append(
-                {
-                    "paper_id": pid, "title": row.get("title", ""), "year": row.get("year") or None,
-                    "venue": row.get("venue") or None, "relevance_score": None,
-                    "quality_score": None, "false_friend": None, "decision": "prefiltered",
-                    "reason": (
-                        "no keyword overlap with the topic or domains; not sent to the reviewer"
-                    ),
-                }
-            )  # fmt: skip
+            decisions.append(_prefiltered(row))
             continue
         decision = _decision(row, scored.get(pid), research.min_relevance, research.min_quality)
         decisions.append(decision)
@@ -222,11 +270,20 @@ async def run(ctx: StageContext) -> list[str]:
                 }
             )
     shortlist.sort(key=lambda r: (r["relevance_score"], r["quality_score"]), reverse=True)
+    cap = research.max_shortlist
+    if cap and len(shortlist) > cap:
+        cut_ids = {str(r["paper_id"]) for r in shortlist[cap:]}
+        shortlist = shortlist[:cap]
+        for decision in decisions:
+            if decision["paper_id"] in cut_ids:
+                decision["decision"] = "below_cutoff"
+                decision["reason"] = _cut_reason(decision["reason"], cap)
 
     counts = {
         "candidates": len(candidates),
         "kept": len(shortlist),
         "rejected": sum(1 for d in decisions if d["decision"] == "rejected"),
+        "below_cutoff": sum(1 for d in decisions if d["decision"] == "below_cutoff"),
         "unscored": sum(1 for d in decisions if d["decision"] == "unscored"),
         "prefiltered": len(dropped_ids),
     }
@@ -236,6 +293,7 @@ async def run(ctx: StageContext) -> list[str]:
         "thresholds": {
             "min_relevance": research.min_relevance,
             "min_quality": research.min_quality,
+            "max_shortlist": cap,
         },
         "summary": counts,
         "decisions": decisions,

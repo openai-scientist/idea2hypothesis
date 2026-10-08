@@ -101,6 +101,10 @@ async def execute_stage(stage: Stage, context: StageContext) -> StageResult:
     warnings: list[str] = []
     for attempt in range(attempts):
         art.reset_stage(int(stage))
+        context.try_index = attempt
+        if attempt:
+            # Results announced by the failed try are void; the next try announces its own.
+            await context.progress("restart")
         try:
             warnings = await STAGE_RUNNERS[stage](context)
             break
@@ -150,9 +154,18 @@ def build_context(
     record = record or services.store.read_run(run_id)
     feedback = record.get("feedback") or {}
     text = feedback.get("text", "") if int(stage) in feedback.get("stages", []) else ""
+    attempt = int(record["attempt"])
+    stage_run = _stage_run(services, run_id, int(stage))
+
+    async def report(kind: str, data: dict[str, Any]) -> None:
+        await _emit(
+            services, run_id, ev.STAGE_PROGRESS, stage=int(stage), attempt=attempt,
+            data={"kind": kind, "stage_run": stage_run, **data},
+        )  # fmt: skip
+
     return StageContext(
         run_id=run_id,
-        attempt=int(record["attempt"]),
+        attempt=attempt,
         stage=stage,
         topic=record["topic"],
         domains=tuple(record.get("domains", [])),
@@ -168,7 +181,18 @@ def build_context(
         checkpoint=lambda: _check(services, run_id),
         hardware=services.hardware,
         sleep=services.sleep,
+        report=report,
     )
+
+
+def _stage_run(services: Services, run_id: str, stage: int) -> int:
+    """Sequence number of the ``stage.started`` event of the stage's current execution."""
+    started = [
+        e.seq
+        for e in services.store.read_events(run_id)
+        if e.type == ev.STAGE_STARTED and e.stage == stage
+    ]
+    return started[-1] if started else 0
 
 
 async def _check(services: Services, run_id: str) -> None:

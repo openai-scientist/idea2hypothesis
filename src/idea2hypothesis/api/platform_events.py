@@ -8,6 +8,11 @@ delivered, so they can be replayed through ``GET /runs/{id}/events`` and the web
 
 UI groups (``stage_key``): scope = stages 1-2, search = 3-4, screen = 5, read = 6,
 synthesize = 7 and ``r1-hypothesize`` = 8 (the group key the run studio reads).
+
+Stages announce parts of their result while they run (core ``stage.progress``): a query's hits,
+a scored batch, a card, a perspective. Those parts are sent at once; when the stage completes
+only what was not sent yet follows. ``agent.message`` lines say what a step is doing and, when
+it ends, what it produced; their numbers and names come from the same records.
 """
 
 from __future__ import annotations
@@ -15,8 +20,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 PLATFORM_FILE = "platform_events.jsonl"
 HYPOTHESIZE_KEY = "r1-hypothesize"
+MAP_KEY = "map"
 _PRIVATE = ("_core_seq", "_batch")
 
 # ---------------------------------------------------------------------------
@@ -113,6 +120,16 @@ GROUPS: tuple[Group, ...] = (
         "Several perspectives propose hypotheses; the final set links each one to a gap, to "
         "evidence and to the result that would prove it wrong.",
         ("Gap map", "Shortlist"),
+    ),
+    Group(
+        MAP_KEY,
+        "map",
+        "Map the argument",
+        (9,),
+        ("strategist", "librarian", "theorist", "reporter"),
+        "Everything the run found is drawn as one semantic graph, from the evidence to what each "
+        "hypothesis would contribute, and laid out on the nine pieces of a research canvas.",
+        ("Sub-question tree", "Knowledge cards", "Gap map", "Hypotheses"),
     ),
 )
 
@@ -249,6 +266,44 @@ _STEPS: dict[str, tuple[str, str, int, str | None, str]] = {
         "Heuristic comparison with the papers already retrieved.",
     ),
     "select": ("Pick the set", "pi", 8, None, "The final hypotheses of this run."),
+    "questions": (
+        "Lay out the questions",
+        "strategist",
+        9,
+        None,
+        "Your topic and the sub-questions it decomposes into, from stages 1 and 2.",
+    ),
+    "foundation": (
+        "Lay the research foundation",
+        "librarian",
+        9,
+        None,
+        "The findings from stage 6, the claims they support or contradict, and the gaps from "
+        "stage 7.",
+    ),
+    "reasoning": (
+        "Tie in the hypotheses",
+        "theorist",
+        9,
+        "Semantic graph",
+        "Each hypothesis from stage 8: the sub-question it answers, the gap it addresses, and the "
+        "claims that give it a rationale or challenge it.",
+    ),
+    "contribution": (
+        "State what each would contribute",
+        "theorist",
+        9,
+        None,
+        "What each hypothesis would add if it holds. Expected only: nothing has been tested.",
+    ),
+    "canvas": (
+        "Fill the research canvas",
+        "reporter",
+        9,
+        "Research canvas",
+        "The nine pieces of the AMJ Management Research Canvas, filled from the run. Findings "
+        "stay open until something is tested.",
+    ),
 }
 
 _STAGE_STEPS: dict[int, tuple[str, ...]] = {
@@ -260,6 +315,24 @@ _STAGE_STEPS: dict[int, tuple[str, ...]] = {
     6: ("extract",),
     7: ("cluster", "overview", "tension", "gaps", "rank"),
     8: ("debate", "write", "check", "select"),
+    9: ("questions", "foundation", "reasoning", "contribution", "canvas"),
+}
+
+
+#: What a step is doing while it runs (no result yet). Steps that report progress replace it
+#: with a line built from what they report.
+_DOING: dict[str, str] = {
+    "goal": "Turning your topic into a research goal: problem, objective, scope and success.",
+    "decompose": "Splitting the goal into sub-questions and noting the risks of each.",
+    "strategy": "Planning search angles and short queries for each sub-question.",
+    "collect": "Sending the queries to each scholarly source.",
+    "score": "Scoring every candidate for relevance and quality.",
+    "extract": "Reading each shortlisted abstract into a knowledge card.",
+    "cluster": "Grouping the knowledge cards into schools of thought.",
+    "debate": "Each perspective is proposing hypotheses from the gaps.",
+    "write": "Merging the perspectives into one set of testable hypotheses.",
+    "check": "Comparing each hypothesis with the literature for novelty.",
+    "questions": "Judging how each card bears on its claim and what grounds each hypothesis.",
 }
 
 
@@ -337,6 +410,18 @@ def _env(
     actor: str | None = None,
 ) -> Envelope:
     return {"type": type_, "stage_key": stage_key, "actor": actor, "payload": payload or {}}
+
+
+def _message(message_id: str, text: str, *, stage_key: str, actor: str, done: bool) -> Envelope:
+    """One narration line; a later line with the same id replaces it, ``done`` closes it."""
+    payload: dict[str, Any] = {"message_id": message_id, "text": text}
+    if done:
+        payload["done"] = True
+    return _env("agent.message", payload, stage_key=stage_key, actor=actor)
+
+
+def _message_id(stage_run: int, try_index: int, step_id: str) -> str:
+    return f"m{stage_run}.{try_index}.{step_id}"
 
 
 def public(row: dict[str, Any]) -> dict[str, Any]:
@@ -459,12 +544,13 @@ def _topic_evaluated(art: ArtifactStore) -> tuple[str, dict[str, Any]]:
             "scores": {k: e[k] for k in ("novelty", "specificity", "feasibility")},
             "overall": e["overall"],
             "threshold": e.get("threshold"),
+            "reasons": e.get("reasons") or {},
             "advice": e.get("suggestion", ""),
         },
     )
 
 
-def _content_stage3(art: ArtifactStore) -> StepEvents:
+def _content_stage3(art: ArtifactStore, delay_ms: int = 0) -> StepEvents:
     plan = _read_yaml(art, 3, "search_plan.yaml")
     queries = art.read_json(3, "queries.json")["queries"]
     sources = art.read_json(3, "sources.json")["sources"]
@@ -500,7 +586,10 @@ def _content_stage3(art: ArtifactStore) -> StepEvents:
     events.append(
         (
             "search.sources",
-            {"sources": [{"id": s["id"], "name": s["name"]} for s in sources], "delay_ms": 0},
+            {
+                "sources": [{"id": s["id"], "name": s["name"]} for s in sources],
+                "delay_ms": delay_ms,
+            },
         )
     )
     return {"strategy": events}
@@ -510,6 +599,37 @@ def _read_yaml(art: ArtifactStore, stage: int, name: str) -> Any:
     import yaml
 
     return yaml.safe_load(art.read_text(stage, name))
+
+
+def _merges(art: ArtifactStore, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Papers found as several records, each record as its source gave it. The first record is
+    the one whose metadata was kept; the others filled its gaps."""
+    names = {}
+    if art.exists(3, "sources.json"):
+        names = {s["id"]: s["name"] for s in art.read_json(3, "sources.json")["sources"]}
+    out = []
+    for paper in candidates:
+        records = paper.get("source_records") or []
+        # Records from before each kept its own citations say nothing about who was kept.
+        if len(records) < 2 or any(r.get("citations") is None for r in records):
+            continue
+        out.append(
+            {
+                "title": paper["title"],
+                "records": [
+                    {
+                        "source": names.get(r["provider"], r["provider"]),
+                        "record_id": r["source_id"],
+                        "citations": r["citations"],
+                        "has_doi": bool(r.get("has_doi")),
+                    }
+                    for r in records
+                ],
+                "kept": names.get(records[0]["provider"], records[0]["provider"]),
+                "kept_record": records[0]["source_id"],
+            }
+        )
+    return out
 
 
 def _content_stage4(art: ArtifactStore) -> StepEvents:
@@ -532,6 +652,13 @@ def _content_stage4(art: ArtifactStore) -> StepEvents:
                     )
                 )
     candidates = art.read_jsonl(4, "candidates.jsonl")
+    merges = _merges(art, candidates)
+    events += [("literature.merged", m) for m in merges]
+    stamped = all(
+        r.get("citations") is not None for c in candidates for r in c.get("source_records") or []
+    )
+    extra = [q["text"] for q in meta.get("queries_used") or [] if q.get("origin") == "expansion"]
+    per_query = meta.get("per_query", {})
     events.append(
         (
             "literature.collected",
@@ -539,6 +666,18 @@ def _content_stage4(art: ArtifactStore) -> StepEvents:
                 "raw": meta["raw"],
                 "unique": meta["unique"],
                 "duplicates": meta["duplicates"],
+                # Duplicates that were not another source's record: a source returned the same
+                # record to another query. Unknown for papers stored before records kept citations.
+                "repeats": (
+                    meta["duplicates"] - sum(len(m["records"]) - 1 for m in merges)
+                    if stamped
+                    else None
+                ),
+                # Queries the engine adds from the topic's words have no cell in the plan's grid.
+                "expansion": {
+                    "queries": len(extra),
+                    "hits": sum(sum(per_query.get(q, {}).values()) for q in extra),
+                },
                 "files": [
                     {"name": "candidates.jsonl", "detail": f"{len(candidates)} papers"},
                     {"name": "references.bib", "detail": f"{len(candidates)} entries"},
@@ -568,27 +707,12 @@ def _content_stage5(art: ArtifactStore) -> StepEvents:
                 "rules": review.get("rules", []),
                 "relevance_min": thresholds.get("min_relevance"),
                 "quality_min": thresholds.get("min_quality"),
+                "candidates": len(decisions),
             },
         )
     ]
     score += [("screen.scored", {"points": points[i : i + 48]}) for i in range(0, len(points), 48)]
-    reject = [
-        (
-            "screen.rejected",
-            {
-                "paper": {
-                    "id": d["paper_id"],
-                    "title": d.get("title", ""),
-                    "venue": d.get("venue") or "",
-                    "false_friend": d.get("false_friend") or "",
-                    "reason": d["reason"],
-                    "decision": d["decision"],
-                }
-            },
-        )
-        for d in decisions
-        if d["decision"] in ("rejected", "unscored", "prefiltered")
-    ]
+    reject = [_rejected(d) for d in decisions if d["decision"] in _NOT_KEPT]
     kept = []
     for row in art.read_jsonl(5, "shortlist.jsonl"):
         records = row.get("source_records") or []
@@ -610,25 +734,66 @@ def _content_stage5(art: ArtifactStore) -> StepEvents:
     return {"score": score, "reject": reject, "shortlist": kept}
 
 
+_NOT_KEPT = ("rejected", "below_cutoff", "unscored", "prefiltered")
+_CARD_FIELDS = ("problem", "method", "data", "metrics", "findings", "limitations")
+
+
+def _rejected(d: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    return (
+        "screen.rejected",
+        {
+            "paper": {
+                "id": d["paper_id"],
+                "title": d.get("title", ""),
+                "venue": d.get("venue") or "",
+                "false_friend": d.get("false_friend") or "",
+                "reason": d["reason"],
+                "decision": d["decision"],
+            }
+        },
+    )
+
+
+def _citations(art: ArtifactStore) -> dict[str, str]:
+    """``Author et al., year`` for each shortlisted paper (cards keep no authors)."""
+    if not art.exists(5, "shortlist.jsonl"):
+        return {}
+    return {str(r["paper_id"]): _citation(r) for r in art.read_jsonl(5, "shortlist.jsonl")}
+
+
+def _card_extracted(
+    card: dict[str, Any], citations: dict[str, str] | None = None
+) -> tuple[str, dict[str, Any]]:
+    cited = (citations or {}).get(str(card["paper_id"]))
+    payload: dict[str, Any] = {
+        "id": card["card_id"],
+        "paper_id": card["paper_id"],
+        "citation": cited or card.get("cite_key") or card.get("title", ""),
+        "cite_key": card.get("cite_key"),
+        "title": card.get("title"),
+        "evidence_scope": card.get("evidence_scope"),
+        "unknown_fields": [k for k in _CARD_FIELDS if card.get(k) is None],
+    }
+    payload.update({k: card.get(k) or "" for k in _CARD_FIELDS})
+    return ("card.extracted", {"card": payload})
+
+
 def _content_stage6(art: ArtifactStore) -> StepEvents:
-    events: list[tuple[str, dict[str, Any]]] = []
-    for name in art.list_files(6):
-        if not (name.startswith("cards/") and name.endswith(".json")):
-            continue
-        card = art.read_json(6, name)
-        fields = ("problem", "method", "data", "metrics", "findings", "limitations")
-        card_payload: dict[str, Any] = {
-            "id": card["card_id"],
-            "paper_id": card["paper_id"],
-            "citation": card.get("cite_key") or card.get("title", ""),
-            "cite_key": card.get("cite_key"),
-            "title": card.get("title"),
-            "evidence_scope": card.get("evidence_scope"),
-            "unknown_fields": [k for k in fields if card.get(k) is None],
+    citations = _citations(art)
+    return {"extract": [_card_extracted(art.read_json(6, name), citations) for name in _cards(art)]}
+
+
+def _set_aside(syn: dict[str, Any]) -> list[dict[str, Any]]:
+    """Cards left out of every cluster, with why; entries that name no card are skipped."""
+    return [
+        {
+            "id": str(a.get("id") or f"A{i}"),
+            "card_ids": a["card_ids"],
+            "reason": a.get("reason", ""),
         }
-        card_payload.update({k: card.get(k) or "" for k in fields})
-        events.append(("card.extracted", {"card": card_payload}))
-    return {"extract": events}
+        for i, a in enumerate(syn.get("set_aside") or [], 1)
+        if isinstance(a, dict) and a.get("card_ids")
+    ]
 
 
 def _content_stage7(art: ArtifactStore) -> StepEvents:
@@ -647,7 +812,8 @@ def _content_stage7(art: ArtifactStore) -> StepEvents:
                 },
             )
             for c in syn["clusters"]
-        ],
+        ]
+        + [("synthesis.set_aside", {"aside": a}) for a in _set_aside(syn)],
         "overview": [("synthesis.overview", {"text": syn["overview"]})]
         if syn.get("overview")
         else [],
@@ -686,11 +852,27 @@ def _content_stage7(art: ArtifactStore) -> StepEvents:
     return out
 
 
+#: Perspective roles of each prompt domain (prompts/hypothesis_roles.yaml) and the Platform agent
+#: that speaks for them: the one who proposes, the one who asks how it is measured, the one who
+#: looks for how it fails.
+_ML_ROLES = {"innovator": "theorist", "pragmatist": "methodologist", "contrarian": "skeptic"}
 _ROLE_ACTORS = {
-    "innovator": "theorist",
-    "pragmatist": "methodologist",
-    "contrarian": "skeptic",
+    **_ML_ROLES,
+    # hep
+    "theorist": "theorist",
+    "phenomenologist": "methodologist",
+    "experimentalist": "skeptic",
+    # biology (experimentalist as in hep)
+    "model_builder": "theorist",
+    "fba_analyst": "methodologist",
 }
+#: Letter of a perspective's own hypotheses in the debate: T1 is the Theorist's first.
+_ACTOR_LETTERS = {"theorist": "T", "methodologist": "M", "skeptic": "S"}
+# Only the ML role names are engine jargon; "experimentalist" or "theorist" in a sentence is a
+# plain word and stays as written.
+_ROLE_WORDS = re.compile(r"\b(" + "|".join(_ML_ROLES) + r")\b", re.IGNORECASE)
+#: Thread of the judge's ranking, which is about the positions, not one hypothesis.
+_VERDICT = "Verdict"
 _ZONES: dict[str, list[int | None]] = {"> 0": [None, 0], "< 0": [0, None], "≠ 0": [0, 0]}
 
 
@@ -706,27 +888,91 @@ def _turns(art: ArtifactStore) -> list[tuple[str, dict[str, Any]]]:
             continue
         rows.append((int(doc.get("round", 0)), str(doc["role"]), doc))
     rows.sort(key=lambda r: (r[0], r[1]))
-    turns = []
-    for rnd, role, doc in rows:
-        text = "\n".join(
-            f"{i}. {h.get('statement', '')}" for i, h in enumerate(doc["hypotheses"], 1)
-        )
-        turns.append(
-            (
-                "debate.turn",
-                {
-                    "turn": {
-                        "id": f"{role}-r{rnd}",
-                        "actor": _ROLE_ACTORS.get(role, "theorist"),
-                        "stance": "propose" if rnd == 0 else "refine",
-                        "text": text,
-                        "role": role,
-                        "round": rnd,
-                    }
-                },
-            )
-        )
+    turns = [t for _, _, doc in rows for t in _turns_of(doc)]
+    if art.exists(8, "perspectives/debate_record.json"):
+        turns += _judge_turn(art.read_json(8, "perspectives/debate_record.json"))
     return turns
+
+
+def _role_name(role: str) -> str:
+    """The name a perspective has on the Platform: the innovator is the Theorist."""
+    return _ROLE_ACTORS.get(role.lower(), role).title()
+
+
+def _named(text: str) -> str:
+    """Model text speaks of the engine's perspective names; the Platform shows its agents' names."""
+    return _ROLE_WORDS.sub(lambda m: _role_name(m.group(1)), text)
+
+
+def _idea(role: str, number: int) -> str:
+    """Thread of one perspective's hypothesis, such as M2."""
+    return f"{_ACTOR_LETTERS.get(_ROLE_ACTORS.get(role, ''), 'T')}{number}"
+
+
+def _turn(
+    turn_id: str,
+    role: str,
+    rnd: int,
+    stance: str,
+    text: str,
+    *,
+    about: str,
+    reply_to: str | None = None,
+    actor: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    payload = {
+        "id": turn_id,
+        "actor": actor or _ROLE_ACTORS.get(role, "theorist"),
+        "stance": stance,
+        "text": _named(text),
+        "about": about,
+        "role": role,
+        "round": rnd,
+    }
+    if reply_to:
+        payload["reply_to"] = reply_to
+    return ("debate.turn", {"turn": payload})
+
+
+def _turns_of(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """One perspective's turns. Each hypothesis is a thread: a proposal starts it, the others'
+    challenges and concessions reply to it, and its author's revision follows."""
+    rnd, role = int(doc.get("round", 0)), str(doc["role"])
+    hyps = doc["hypotheses"]
+
+    def own(i: int, turn_id: str, stance: str) -> tuple[str, dict[str, Any]]:
+        statement = str(hyps[i - 1].get("statement", ""))
+        return _turn(turn_id, role, rnd, stance, statement, about=_idea(role, i))
+
+    if rnd == 0:
+        return [own(i, f"{role}-h{i}", "propose") for i in range(1, len(hyps) + 1)]
+    turns = [
+        _turn(
+            f"{role}-r{rnd}-{k}", role, rnd, str(r["stance"]), str(r["text"]),
+            about=_idea(str(r["to"]), int(r["hypothesis"])),
+            reply_to=f"{r['to']}-h{int(r['hypothesis'])}",
+        )
+        for k, r in enumerate(doc.get("responses") or [], 1)
+    ]  # fmt: skip
+    numbers = range(1, len(hyps) + 1)
+    for key, stance in (("revised", "refine"), ("added", "propose")):
+        turns += [own(i, f"{role}-r{rnd}-h{i}", stance) for i in doc.get(key) or [] if i in numbers]
+    return turns
+
+
+def _judge_turn(record: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """The independent judge's ranking, said by the PI (who picks the set)."""
+    rankings = [r for r in record.get("rankings") or [] if isinstance(r, dict)]
+    if not rankings:
+        return []
+    lines = []
+    for i, r in enumerate(rankings, 1):
+        name = _role_name(str(r.get("role", "")))
+        score = f" ({r['score']}/10)" if r.get("score") is not None else ""
+        lines.append(f"{i}. {name}{score}: {r.get('reason', '')}".rstrip(": "))
+    rounds = int(record.get("rounds", 0))
+    text = "\n".join(lines)
+    return [_turn("judge", "judge", rounds, "test", text, about=_VERDICT, actor="pi")]
 
 
 def _hypothesis_payload(h: dict[str, Any]) -> dict[str, Any]:
@@ -779,10 +1025,17 @@ def _content_stage8(art: ArtifactStore, flags: Flags) -> StepEvents:
     if flags.novelty_check and art.exists(8, "novelty_report.json"):
         report = art.read_json(8, "novelty_report.json")
         threshold = float(report.get("similarity_threshold", 0.25))
+        known = (
+            {str(r["paper_id"]): r for r in art.read_jsonl(4, "candidates.jsonl")}
+            if art.exists(4, "candidates.jsonl")
+            else {}
+        )
         checks = []
         for row in report.get("per_hypothesis", []):
             closest = row.get("closest_paper") or {}
             similarity = float(closest.get("similarity", 0.0))
+            # "Author et al., year" when the paper is one the run collected; its title otherwise.
+            found = known.get(str(closest.get("paper_id")))
             checks.append(
                 (
                     "hypothesis.checked",
@@ -790,7 +1043,7 @@ def _content_stage8(art: ArtifactStore, flags: Flags) -> StepEvents:
                         "hypothesis_id": row["hypothesis_id"],
                         "novelty": {
                             "novel": similarity < threshold,
-                            "closest": closest.get("title", ""),
+                            "closest": _citation(found) if found else closest.get("title", ""),
                             "similarity": similarity,
                         },
                         "assessment": "heuristic, not proof of novelty",
@@ -801,14 +1054,51 @@ def _content_stage8(art: ArtifactStore, flags: Flags) -> StepEvents:
     return out
 
 
-def stage_content(art: ArtifactStore, stage: int, flags: Flags, domains: list[str]) -> StepEvents:
+#: entity type and relation -> the map step that draws it
+_MAP_STEP = {
+    "question": "questions",
+    "decomposes_into": "questions",
+    "evidence": "foundation",
+    "claim": "foundation",
+    "gap": "foundation",
+    "supports": "foundation",
+    "contradicts": "foundation",
+    "motivates": "foundation",
+    "hypothesis": "reasoning",
+    "assumption": "reasoning",
+    "proposes_answer_to": "reasoning",
+    "provides_rationale_for": "reasoning",
+    "addresses": "reasoning",
+    "depends_on": "reasoning",
+    "contribution": "contribution",
+    "informs": "contribution",
+    "targets": "contribution",
+}
+
+
+def _content_stage9(art: ArtifactStore) -> StepEvents:
+    """Each step draws its entities, then the relations they complete."""
+    graph = art.read_json(9, "semantic_graph.json")
+    out: StepEvents = {s: [] for s in _STAGE_STEPS[9]}
+    for node in graph["entities"]:
+        out[_MAP_STEP[node["type"]]].append(("map.node", {"node": node}))
+    for edge in graph["relations"]:
+        out[_MAP_STEP[edge["relation"]]].append(("map.edge", {"edge": edge}))
+    pieces = art.read_json(9, "research_canvas.json")["pieces"]
+    out["canvas"] = [("canvas.piece", {"piece": p}) for p in pieces]
+    return out
+
+
+def stage_content(
+    art: ArtifactStore, stage: int, flags: Flags, domains: list[str], delay_ms: int = 0
+) -> StepEvents:
     """Events of every step of ``stage``, built from the artifacts on disk."""
     if stage == 1:
         return _content_stage1(art, flags, domains)
     if stage == 2:
         return _content_stage2(art)
     if stage == 3:
-        return _content_stage3(art)
+        return _content_stage3(art, delay_ms)
     if stage == 4:
         return _content_stage4(art)
     if stage == 5:
@@ -817,6 +1107,8 @@ def stage_content(art: ArtifactStore, stage: int, flags: Flags, domains: list[st
         return _content_stage6(art)
     if stage == 7:
         return _content_stage7(art)
+    if stage == 9:
+        return _content_stage9(art)
     return _content_stage8(art, flags)
 
 
@@ -846,8 +1138,18 @@ def stage_summary(art: ArtifactStore, group: Group) -> str:
     if last == 7:
         syn = art.read_json(7, "synthesis.json")
         return (
-            f"{len(syn['clusters'])} groups • {len(syn.get('tensions') or [])} tensions • "
-            f"{len(syn['gaps'])} gaps"
+            f"{_plural(len(syn['clusters']), 'group')} • "
+            f"{_plural(len(syn.get('tensions') or []), 'tension')} • "
+            f"{_plural(len(syn['gaps']), 'gap')}"
+        )
+    if last == 9:
+        graph = art.read_json(9, "semantic_graph.json")
+        pieces = art.read_json(9, "research_canvas.json")["pieces"]
+        filled = sum(1 for p in pieces if p["status"] == "filled")
+        return (
+            f"{_plural(len(graph['entities']), 'entity', 'entities')} • "
+            f"{_plural(len(graph['relations']), 'relation')} • "
+            f"{filled} of {len(pieces)} canvas pieces filled; findings wait for the experiment"
         )
     count = len(art.read_json(8, "hypotheses.json")["hypotheses"])
     return f"{count} hypotheses to test, each with a way to be wrong"
@@ -855,6 +1157,134 @@ def stage_summary(art: ArtifactStore, group: Group) -> str:
 
 def _cards(art: ArtifactStore) -> list[str]:
     return [n for n in art.list_files(6) if n.startswith("cards/") and n.endswith(".json")]
+
+
+def _plural(count: int, noun: str, plural: str | None = None) -> str:
+    return f"{count} {noun if count == 1 else plural or noun + 's'}"
+
+
+def _source_names(art: ArtifactStore) -> list[str]:
+    if not art.exists(3, "sources.json"):
+        return []
+    return [str(s["name"]) for s in art.read_json(3, "sources.json")["sources"]]
+
+
+def _join(names: list[str]) -> str:
+    if len(names) <= 2:
+        return " and ".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def step_note(art: ArtifactStore, step_id: str) -> str | None:
+    """What a finished step produced, in one line built from its artifacts (or None)."""
+    if step_id == "goal":
+        title = art.read_json(1, "goal.json").get("working_title")
+        return f"Goal set: {title}." if title else None
+    if step_id == "decompose":
+        tree = art.read_json(2, "problem_tree.json")
+        risks = tree.get("risks") or []
+        return (
+            f"{_plural(len(tree['sub_questions']), 'sub-question')}, ranked by priority, "
+            f"with {_plural(len(risks), 'risk')} noted."
+        )
+    if step_id == "evaluate":
+        e = art.read_json(2, "topic_evaluation.json")
+        bar = f" against a bar of {e['threshold']}" if e.get("threshold") is not None else ""
+        return f"Topic scored {e['overall']} of 10{bar}."
+    if step_id == "strategy":
+        plan = _read_yaml(art, 3, "search_plan.yaml")
+        queries = art.read_json(3, "queries.json")["queries"]
+        return (
+            f"{_plural(len(plan['search_strategies']), 'search angle')} with "
+            f"{_plural(len(queries), 'query', 'queries')} for {_join(_source_names(art))}."
+        )
+    if step_id == "collect":
+        meta = art.read_json(4, "search_meta.json")
+        failed = len(meta.get("errors") or [])
+        tail = f" {_plural(failed, 'request')} failed." if failed else ""
+        return (
+            f"{meta['raw']} hits; {meta['unique']} unique papers after merging "
+            f"{_plural(meta['duplicates'], 'duplicate')}.{tail}"
+        )
+    if step_id in ("score", "reject", "shortlist"):
+        return _screen_note(art, step_id)
+    if step_id == "extract":
+        meta = art.read_json(6, "knowledge_meta.json")
+        skipped = len(meta.get("skipped") or [])
+        tail = f"; {_plural(skipped, 'paper')} had no abstract" if skipped else ""
+        return f"{_plural(meta['cards'], 'knowledge card')} from abstracts{tail}."
+    if step_id == "cluster":
+        syn = art.read_json(7, "synthesis.json")
+        aside = sum(len(a["card_ids"]) for a in _set_aside(syn))
+        tail = f"; {_plural(aside, 'card')} set aside, each with a reason" if aside else ""
+        return f"{_plural(len(syn['clusters']), 'school')} of thought{tail}."
+    if step_id == "gaps":
+        syn = art.read_json(7, "synthesis.json")
+        return f"{_plural(len(syn['gaps']), 'research gap')}, each traced to its cards."
+    if step_id == "debate":
+        turns = [t["turn"] for _, t in _turns(art)]
+        proposals = [t for t in turns if t["round"] == 0]
+        roles = {t["role"] for t in proposals}
+        rounds = {t["round"] for t in turns if t["round"] > 0 and t["role"] != "judge"}
+        debated = f", then answered each other in {_plural(len(rounds), 'round')}" if rounds else ""
+        return (
+            f"{_plural(len(roles), 'perspective')} proposed "
+            f"{_plural(len(proposals), 'hypothesis', 'hypotheses')}{debated}."
+        )
+    if step_id == "write":
+        count = len(art.read_json(8, "hypotheses.json")["hypotheses"])
+        return (
+            f"{_plural(count, 'hypothesis', 'hypotheses')}, each with a result that would "
+            "prove it wrong."
+        )
+    if step_id in ("questions", "foundation", "reasoning", "contribution"):
+        return _map_note(art, step_id)
+    if step_id == "check" and art.exists(8, "novelty_report.json"):
+        report = art.read_json(8, "novelty_report.json")
+        threshold = float(report.get("similarity_threshold", 0.25))
+        rows = report.get("per_hypothesis", [])
+        similar = [float((r.get("closest_paper") or {}).get("similarity", 0)) for r in rows]
+        novel = sum(1 for value in similar if value < threshold)
+        return f"{novel} of {len(rows)} look new against the papers found (a heuristic check)."
+    return None
+
+
+def _map_note(art: ArtifactStore, step_id: str) -> str | None:
+    graph = art.read_json(9, "semantic_graph.json")
+    n = {
+        t: sum(1 for e in graph["entities"] if e["type"] == t)
+        for t in ("question", "evidence", "claim", "gap", "hypothesis", "contribution")
+    }
+    if step_id == "questions":
+        return f"Your question and its {_plural(n['question'] - 1, 'sub-question')}."
+    if step_id == "foundation":
+        return (
+            f"{_plural(n['evidence'], 'finding')} behind {_plural(n['claim'], 'claim')}, and "
+            f"{_plural(n['gap'], 'gap')} still open."
+        )
+    if step_id == "reasoning":
+        return (
+            f"{_plural(n['hypothesis'], 'hypothesis', 'hypotheses')}, each tied to its question, "
+            "gap and claims."
+        )
+    return f"{_plural(n['contribution'], 'expected contribution')}, none shown yet."
+
+
+def _screen_note(art: ArtifactStore, step_id: str) -> str | None:
+    review = art.read_json(5, "review.json")
+    summary = review["summary"]
+    if step_id == "score":
+        scored = [d for d in review["decisions"] if d.get("relevance_score") is not None]
+        passed = ("kept", "below_cutoff", "dropped_by_reviewer")
+        clear = sum(1 for d in scored if d["decision"] in passed)
+        return f"Scored {_plural(len(scored), 'paper')}; {clear} clear both bars."
+    if step_id == "reject":
+        aside = summary.get("prefiltered", 0) + summary.get("unscored", 0)
+        tail = f"; {aside} set aside unscored" if aside else ""
+        return f"{_plural(summary.get('rejected', 0), 'paper')} rejected with a reason{tail}."
+    cut = summary.get("below_cutoff", 0)
+    tail = f"; {cut} more cleared both bars but ranked lower" if cut else ""
+    return f"Kept {summary['kept']} of {summary['candidates']} papers{tail}."
 
 
 # ---------------------------------------------------------------------------
@@ -893,6 +1323,14 @@ def gate_spec(mode: str, data: dict[str, Any], art: ArtifactStore) -> dict[str, 
                 "summary": [
                     f"{len(shortlist)} of {meta.get('unique', summary.get('candidates', '?'))} "
                     "papers kept, each with a reason",
+                    *(
+                        [
+                            f"{summary['below_cutoff']} more cleared both bars but ranked below "
+                            "the best-scored papers kept"
+                        ]
+                        if summary.get("below_cutoff")
+                        else []
+                    ),
                     f"{summary.get('rejected', 0)} papers rejected, "
                     f"{summary.get('unscored', 0) + summary.get('prefiltered', 0)} "
                     "excluded unscored",
@@ -986,6 +1424,9 @@ class RunView:
     record: dict[str, Any]
     flags: Flags
     artifacts: ArtifactStore
+    store: RunStore | None = None
+    #: Pause between literature queries, as configured for this run.
+    query_delay_ms: int = 0
 
     @property
     def domains(self) -> list[str]:
@@ -999,29 +1440,67 @@ class RunView:
 def load_view(store: RunStore, run_id: str) -> RunView:
     record = store.read_run(run_id)
     try:
-        research = store.read_snapshot(run_id, "config").get("research", {})
+        snapshot = store.read_snapshot(run_id, "config")
     except (OSError, ValueError):
-        research = {}
+        snapshot = {}
+    research = snapshot.get("research", {})
+    delay = float((snapshot.get("literature") or {}).get("inter_query_delay_sec", 0) or 0)
     flags = Flags(
         mode=record["review_mode"],
         hardware_advisory=bool(research.get("hardware_advisory", False)),
         novelty_check=bool(research.get("novelty_check", True)),
     )
-    return RunView(run_id, record, flags, store.artifacts(run_id))
+    return RunView(
+        run_id, record, flags, store.artifacts(run_id), store, query_delay_ms=round(delay * 1000)
+    )
 
 
 def _stage_events(
-    group: Group, stage: int, view: RunView, content: StepEvents, *, first_started: bool
+    group: Group,
+    stage: int,
+    view: RunView,
+    content: StepEvents,
+    *,
+    started: str,
+    done: frozenset[str] | set[str] = frozenset(),
+    stage_run: int = 0,
+    try_index: int = 0,
 ) -> list[Envelope]:
-    """Step events of one completed core stage (its first step may already be started)."""
+    """Step events of one completed core stage.
+
+    ``started`` is the step already started (by ``stage.started`` or by progress); steps in
+    ``done`` were already completed by progress and are skipped.
+    """
     out: list[Envelope] = []
-    for i, step_id in enumerate(view.flags.steps(stage)):
+    for step_id in view.flags.steps(stage):
+        if step_id in done:
+            continue
         actor = _STEPS[step_id][1]
-        if not (i == 0 and first_started):
+        if step_id != started:
             out.append(_env("step.started", {"step_id": step_id}, stage_key=group.key, actor=actor))
         out += [_env(t, p, stage_key=group.key, actor=actor) for t, p in content.get(step_id, [])]
+        note = _note(view.artifacts, step_id)
+        if note:
+            message_id = _message_id(stage_run, try_index, step_id)
+            out.append(_message(message_id, note, stage_key=group.key, actor=actor, done=True))
         out.append(_env("step.completed", {"step_id": step_id}, stage_key=group.key, actor=actor))
     return out
+
+
+def _note(art: ArtifactStore, step_id: str) -> str | None:
+    try:
+        return step_note(art, step_id)
+    except (KeyError, ValueError, OSError, TypeError):  # a note never stops the stream
+        logger.exception("could not build the note of step %s", step_id)
+        return None
+
+
+def _doing(view: RunView, step_id: str) -> str | None:
+    """The live line of a step that has just started."""
+    if step_id == "cluster":
+        cards = len(_cards(view.artifacts))
+        return f"Grouping {_plural(cards, 'knowledge card')} into schools of thought."
+    return _DOING.get(step_id)
 
 
 def _on_stage_started(view: RunView, event: Event) -> list[Envelope]:
@@ -1038,20 +1517,395 @@ def _on_stage_started(view: RunView, event: Event) -> list[Envelope]:
             )
         )
     first = view.flags.steps(stage)[0]
-    out.append(
-        _env("step.started", {"step_id": first}, stage_key=group.key, actor=_STEPS[first][1])
-    )
+    actor = _STEPS[first][1]
+    out.append(_env("step.started", {"step_id": first}, stage_key=group.key, actor=actor))
+    doing = _doing(view, first)
+    if doing:
+        message_id = _message_id(event.seq, 0, first)
+        out.append(_message(message_id, doing, stage_key=group.key, actor=actor, done=False))
     return out
 
 
 def _on_stage_completed(view: RunView, event: Event) -> list[Envelope]:
     stage = int(event.stage or 0)
     group = _BY_STAGE[stage]
-    content = stage_content(view.artifacts, stage, view.flags, view.domains)
-    out = _stage_events(group, stage, view, content, first_started=True)
+    streamed = _streamed(view, stage, event.seq)
+    content = stage_content(
+        view.artifacts, stage, view.flags, view.domains, delay_ms=view.query_delay_ms
+    )
+    started, done = _trim(stage, content, streamed, view.flags.steps(stage))
+    out = _stage_events(
+        group, stage, view, content, started=started, done=done,
+        stage_run=streamed.stage_run, try_index=streamed.try_index,
+    )  # fmt: skip
     if stage == group.last and view.flags.gate_step(group) is None:
         out.append(_stage_done(view, group, event))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Stage progress: parts of a result sent while the stage runs
+# ---------------------------------------------------------------------------
+
+#: progress kind -> the step it belongs to
+_PROGRESS_STEP = {
+    "queries": "collect",
+    "query": "collect",
+    "screen_plan": "score",
+    "screen_batch": "score",
+    "cards_plan": "extract",
+    "card": "extract",
+    "perspectives_plan": "debate",
+    "perspective": "debate",
+    "judged": "debate",
+    "merge": "write",
+    "novelty": "check",
+}
+
+
+@dataclass
+class _Streamed:
+    """What the current try of a stage's execution has already sent through progress."""
+
+    stage_run: int = 0
+    try_index: int = 0
+    kinds: set[str] = field(default_factory=set)
+    #: ``point:<paper>``, ``rejected:<paper>``, ``card:<card>`` and ``turn:<role>-r<round>``
+    ids: set[str] = field(default_factory=set)
+
+
+def _streamed(view: RunView, stage: int, until_seq: int) -> _Streamed:
+    out = _Streamed()
+    if view.store is None:
+        return out
+    for e in view.store.read_events(view.run_id):
+        if e.seq >= until_seq:
+            break
+        if e.stage != stage:
+            continue
+        if e.type == ev.STAGE_STARTED:
+            out = _Streamed(stage_run=e.seq)
+        elif e.type == ev.STAGE_PROGRESS:
+            kind = str(e.data.get("kind"))
+            if kind == "restart":  # what the failed try sent was replaced
+                out = _Streamed(stage_run=out.stage_run, try_index=int(e.data.get("try", 0)))
+                continue
+            out.try_index = int(e.data.get("try", out.try_index))
+            out.kinds.add(kind)
+            out.ids.update(_streamed_ids(e.data))
+    return out
+
+
+def _streamed_ids(data: dict[str, Any]) -> list[str]:
+    kind = data.get("kind")
+    if kind == "screen_plan":
+        return [f"rejected:{d['paper_id']}" for d in data.get("prefiltered") or []]
+    if kind == "screen_batch":
+        ids = []
+        for d in data.get("decisions") or []:
+            if d.get("relevance_score") is not None and d.get("quality_score") is not None:
+                ids.append(f"point:{d['paper_id']}")
+            if d.get("decision") in ("rejected", "unscored"):
+                ids.append(f"rejected:{d['paper_id']}")
+        return ids
+    if kind == "card":
+        return [f"card:{data['card_id']}"]
+    if kind == "perspective":  # every turn of that perspective in that round
+        return [f"turns:{data['role']}-r{int(data.get('round', 0))}"]
+    if kind == "judged":
+        return ["turn:judge"]
+    return []
+
+
+def _trim(
+    stage: int, content: StepEvents, streamed: _Streamed, steps: tuple[str, ...]
+) -> tuple[str, set[str]]:
+    """Remove from ``content`` what progress already sent; returns (started step, done steps)."""
+    started, done = steps[0], set[str]()
+    kinds, ids = streamed.kinds, streamed.ids
+    if stage == 4 and "query" in kinds:
+        sent = ("literature.request", "literature.batch")
+        content["collect"] = [e for e in content.get("collect", []) if e[0] not in sent]
+    elif stage == 5:
+        score = content.get("score", [])
+        if "screen_plan" in kinds:
+            score = [e for e in score if e[0] != "screen.criteria"]
+        points = [
+            p
+            for t, payload in score
+            if t == "screen.scored"
+            for p in payload["points"]
+            if f"point:{p['id']}" not in ids
+        ]
+        score = [e for e in score if e[0] != "screen.scored"]
+        chunks = range(0, len(points), 48)
+        score += [("screen.scored", {"points": points[i : i + 48]}) for i in chunks]
+        content["score"] = score
+        content["reject"] = [
+            e for e in content.get("reject", []) if f"rejected:{e[1]['paper']['id']}" not in ids
+        ]
+    elif stage == 6:
+        content["extract"] = [
+            e for e in content.get("extract", []) if f"card:{e[1]['card']['id']}" not in ids
+        ]
+    elif stage == 8:
+        content["debate"] = [
+            e
+            for e in content.get("debate", [])
+            if f"turn:{e[1]['turn']['id']}" not in ids
+            and f"turns:{e[1]['turn']['role']}-r{e[1]['turn']['round']}" not in ids
+        ]
+        if "merge" in kinds:
+            done.add("debate")
+            started = "write"
+        if "novelty" in kinds:
+            done.add("write")
+            started = "check"
+    return started, done
+
+
+def _on_stage_progress(view: RunView, event: Event) -> list[Envelope]:
+    data = event.data
+    kind = str(data.get("kind"))
+    stage = int(event.stage or 0)
+    group = _BY_STAGE[stage]
+    stage_run, try_index = int(data.get("stage_run", 0)), int(data.get("try", 0))
+    if kind == "restart":
+        return _on_restart(view, group, stage, stage_run, try_index)
+    step = _PROGRESS_STEP.get(kind)
+    if step is None:
+        return []
+    progress = _Progress(view, group, event, step, stage_run, try_index)
+    handler = _PROGRESS_HANDLERS.get(kind)
+    return handler(progress, data) if handler else []
+
+
+def _on_restart(
+    view: RunView, group: Group, stage: int, stage_run: int, try_index: int
+) -> list[Envelope]:
+    """A transient error restarted the stage: start its UI group over (never another stage's)."""
+    if len(group.stages) != 1:
+        return []  # keyed content (search cells) is simply sent again
+    first = view.flags.steps(stage)[0]
+    actor = _STEPS[first][1]
+    out = [
+        _env("stage.started", {"plan": stage_plan(group, view.flags)}, stage_key=group.key,
+             actor=group.cast[0]),
+        _env("step.started", {"step_id": first}, stage_key=group.key, actor=actor),
+    ]  # fmt: skip
+    doing = _doing(view, first)
+    if doing:
+        message_id = _message_id(stage_run, try_index, first)
+        out.append(_message(message_id, doing, stage_key=group.key, actor=actor, done=False))
+    return out
+
+
+@dataclass
+class _Progress:
+    """Envelope helpers for one progress event of one step."""
+
+    view: RunView
+    group: Group
+    event: Event
+    step: str
+    stage_run: int
+    try_index: int
+
+    @property
+    def art(self) -> ArtifactStore:
+        return self.view.artifacts
+
+    def env(self, type_: str, payload: dict[str, Any], step: str | None = None) -> Envelope:
+        actor = _STEPS[step or self.step][1]
+        return _env(type_, payload, stage_key=self.group.key, actor=actor)
+
+    def say(self, text: str, *, step: str | None = None, done: bool = False) -> Envelope:
+        step = step or self.step
+        return _message(
+            _message_id(self.stage_run, self.try_index, step),
+            text,
+            stage_key=self.group.key,
+            actor=_STEPS[step][1],
+            done=done,
+        )
+
+    def close(self, step: str) -> list[Envelope]:
+        """End ``step``: its note (closing its live line) and ``step.completed``."""
+        out = []
+        note = _note(self.art, step)
+        if note:
+            out.append(self.say(note, step=step, done=True))
+        out.append(self.env("step.completed", {"step_id": step}, step))
+        return out
+
+    def open(self, step: str) -> list[Envelope]:
+        out = [self.env("step.started", {"step_id": step}, step)]
+        doing = _doing(self.view, step)
+        if doing:
+            out.append(self.say(doing, step=step))
+        return out
+
+
+def _progress_queries(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    total = int(data.get("planned", 0)) + int(data.get("expanded", 0))
+    delay = p.view.query_delay_ms / 1000
+    pace = f", {delay:g} s apart to respect each source" if delay else ""
+    names = _join(_source_names(p.art)) or "the sources"
+    return [p.say(f"Sending {_plural(total, 'query', 'queries')} to {names}{pace}.")]
+
+
+def _progress_query(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    queries = {q["text"]: q["id"] for q in p.art.read_json(3, "queries.json")["queries"]}
+    sources = {s["id"] for s in p.art.read_json(3, "sources.json")["sources"]}
+    hits: dict[str, int] = data.get("hits") or {}
+    out: list[Envelope] = []
+    query_id = queries.get(data["text"])
+    if query_id:  # expansion queries have no id in the plan, so no cell
+        for source, count in hits.items():
+            if source in sources:
+                cell = {"query_id": query_id, "source_id": source}
+                out.append(p.env("literature.request", cell))
+                out.append(p.env("literature.batch", {**cell, "hits": count}))
+    found = sum(int(v) for v in hits.values())
+    out.append(
+        p.say(
+            f"Query {data['index']} of {data['total']}: “{_short(data['text'], 60)}”, "
+            f"{_plural(found, 'hit')} ({data['raw']} so far)."
+        )
+    )
+    return out
+
+
+def _progress_screen_plan(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    criteria = {
+        "rules": data.get("rules", []),
+        "relevance_min": data.get("min_relevance"),
+        "quality_min": data.get("min_quality"),
+        "candidates": data.get("candidates"),
+    }
+    prefiltered = data.get("prefiltered") or []
+    out = [p.env("screen.criteria", criteria)]
+    out += [p.env(*_rejected(d)) for d in prefiltered]
+    aside = (
+        f"; {len(prefiltered)} share no keyword with the topic and are set aside"
+        if prefiltered
+        else ""
+    )
+    out.append(
+        p.say(
+            f"Scoring {_plural(int(data['to_screen']), 'paper')} in "
+            f"{_plural(int(data['batches']), 'batch', 'batches')} against the relevance and "
+            f"quality bars{aside}."
+        )
+    )
+    return out
+
+
+def _progress_screen_batch(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    rows = data.get("decisions") or []
+    points = [
+        {"id": d["paper_id"], "relevance": d["relevance_score"], "quality": d["quality_score"]}
+        for d in rows
+        if d.get("relevance_score") is not None and d.get("quality_score") is not None
+    ]
+    out = [p.env("screen.scored", {"points": points})] if points else []
+    out += [p.env(*_rejected(d)) for d in rows if d.get("decision") in ("rejected", "unscored")]
+    clear = sum(1 for d in rows if d.get("decision") == "kept")
+    out.append(
+        p.say(
+            f"Batch {data['index']} of {data['total']} scored: {clear} of {len(rows)} clear "
+            "both bars."
+        )
+    )
+    return out
+
+
+def _progress_cards_plan(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    cached = int(data.get("cached", 0))
+    again = f" ({cached} already read)" if cached else ""
+    total = int(data.get("total", 0))
+    return [p.say(f"Reading {_plural(total, 'abstract')}, one knowledge card each{again}.")]
+
+
+def _progress_card(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    card = p.art.read_partial(6, p.event.attempt, str(data.get("partial", "")))
+    if not isinstance(card, dict):
+        return []
+    title = _short(str(card.get("title") or card.get("cite_key") or ""), 70)
+    return [
+        p.env(*_card_extracted(card, _citations(p.art))),
+        p.say(f"Card {data['index']} of {data['total']}: {title}"),
+    ]
+
+
+def _progress_perspectives_plan(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    roles = [_role_name(str(r)) for r in data.get("roles") or []]
+    who = f"The {_join(roles)} are" if roles else "Each perspective is"
+    return [p.say(f"{who} proposing hypotheses from the gaps.")]
+
+
+def _progress_perspective(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    name = str(data.get("file", ""))
+    if not p.art.exists(8, name):
+        return []
+    doc = p.art.read_json(8, name)
+    rnd = int(doc.get("round", 0))
+    if rnd == 0:
+        what = f"proposed {_plural(len(doc.get('hypotheses') or []), 'hypothesis', 'hypotheses')}"
+    else:
+        stances = [r.get("stance") for r in doc.get("responses") or []]
+        parts = [
+            f"challenged {_plural(stances.count('challenge'), 'hypothesis', 'hypotheses')}",
+            f"conceded {stances.count('concede')}",
+            f"revised {len(doc.get('revised') or [])} of its own",
+        ]
+        what = f"{', '.join(parts)} in round {rnd}"
+    name = _role_name(str(doc["role"]))
+    return [*(p.env(*t) for t in _turns_of(doc)), p.say(f"The {name} {what}.")]
+
+
+def _progress_judged(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    name = str(data.get("file", ""))
+    if not p.art.exists(8, name):
+        return []
+    record = p.art.read_json(8, name)
+    turns = _judge_turn(record)
+    if not turns:
+        return []
+    who = (
+        "An independent reviewer model"
+        if record.get("independent_judge")
+        else "A judge (the same model as the perspectives)"
+    )
+    return [*(p.env(*t) for t in turns), p.say(f"{who} ranked the positions.")]
+
+
+def _progress_merge(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    return [*p.close("debate"), *p.open("write")]
+
+
+def _progress_novelty(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    """The final set is written (only the novelty check is left): send it now."""
+    content = _content_stage8(p.art, p.view.flags)
+    out = [p.env(t, payload, "write") for t, payload in content.get("write", [])]
+    out += p.close("write")
+    out += p.open("check")
+    return out
+
+
+_PROGRESS_HANDLERS: dict[str, Callable[[_Progress, dict[str, Any]], list[Envelope]]] = {
+    "queries": _progress_queries,
+    "query": _progress_query,
+    "screen_plan": _progress_screen_plan,
+    "screen_batch": _progress_screen_batch,
+    "cards_plan": _progress_cards_plan,
+    "card": _progress_card,
+    "perspectives_plan": _progress_perspectives_plan,
+    "perspective": _progress_perspective,
+    "judged": _progress_judged,
+    "merge": _progress_merge,
+    "novelty": _progress_novelty,
+}
 
 
 def _stage_done(view: RunView, group: Group, event: Event) -> Envelope:
@@ -1146,6 +2000,8 @@ def map_core_event(view: RunView, event: Event) -> list[Envelope]:
         return _on_stage_started(view, event)
     if kind == ev.STAGE_COMPLETED:
         return _on_stage_completed(view, event)
+    if kind == ev.STAGE_PROGRESS:
+        return _on_stage_progress(view, event)
     if kind == ev.STAGE_FAILED:
         return _on_stage_failed(view, event)
     if kind == ev.GATE_OPENED:

@@ -101,7 +101,7 @@ async def test_phase1_run_management_routes(tmp_path: Path) -> None:
         run_id = await _full_run(h)
         status = (await h.client.get("/api/phase1/status")).json()
         assert status["run_id"] == run_id and status["progress_percentage"] == 100
-        assert [s["status"] for s in status["stages"]] == ["completed"] * 8
+        assert [s["status"] for s in status["stages"]] == ["completed"] * 9
         assert status["is_running"] is False
 
         runs = (await h.client.get("/api/phase1/runs")).json()
@@ -112,9 +112,9 @@ async def test_phase1_run_management_routes(tmp_path: Path) -> None:
         assert summary["stage_8_novelty_report"]["kind"] == "novelty_assessment"
         assert summary["stage_8_hypotheses"].startswith("# Hypotheses")
         checkpoint = (await h.client.get(f"/api/phase1/runs/{run_id}/checkpoint")).json()
-        assert sorted(checkpoint["stages"]) == [str(n) for n in range(1, 9)]
+        assert sorted(checkpoint["stages"]) == [str(n) for n in range(1, 10)]
         overview = (await h.client.get(f"/api/phase1/runs/{run_id}/health-overview")).json()
-        assert [row["stage_id"] for row in overview] == [f"{n:02d}" for n in range(1, 9)]
+        assert [row["stage_id"] for row in overview] == [f"{n:02d}" for n in range(1, 10)]
 
         # the same run is a Platform run too
         assert (await h.state(run_id))["status"] == "completed"
@@ -222,7 +222,7 @@ async def test_put_hypotheses_is_validated_against_the_contract(tmp_path: Path) 
             f"/api/stage8/{run_id}/hypotheses", json={"content": json.dumps(good)}
         )
         assert ok.status_code == 200, ok.text
-        assert ok.json()["downstream_invalidated"] is False
+        assert ok.json()["downstream_invalidated"] is True  # the argument map is redrawn
         assert "Edited statement" in (await h.client.get(f"/api/stage8/{run_id}/hypotheses")).text
         assert validate_stage(Stage.HYPOTHESIS_GEN, art).ok
 

@@ -6,6 +6,7 @@ import pytest
 
 from idea2hypothesis.pipeline.contracts import (
     check_hypotheses,
+    check_synthesis,
     normalise_prediction,
     unsupported_numbers,
 )
@@ -193,6 +194,31 @@ def test_hypotheses_must_have_distinct_novelty_and_rationale() -> None:
     )
     assert any("repeat the same novelty" in e for e in result.errors)
     assert any("repeat the same rationale" in e for e in result.errors)
+
+
+def test_synthesis_must_account_for_every_card_it_was_given() -> None:
+    gap = {"text": "t", "sub_question_ids": ["SQ1"], "card_ids": ["a"]}
+    gaps = [{"id": "G1", **gap}, {"id": "G2", **gap}]
+    syn: dict = {
+        "clusters": [
+            {"id": "C1", "title": "x", "card_ids": ["a", "b"]},
+            {"id": "C2", "title": "y", "card_ids": ["b"]},
+        ],
+        "gaps": gaps,
+    }
+    cards = {"a", "b", "c", "d"}
+    left = check_synthesis(syn, {"SQ1"}, cards, every_card=True)
+    assert any("2 cards are in no cluster and not set aside: c, d" in e for e in left.errors)
+    assert any("placed more than once: b" in w for w in left.warnings)
+    assert not check_synthesis(syn, {"SQ1"}, cards).errors  # a finished run is not re-judged
+    syn["set_aside"] = [{"id": "A1", "card_ids": ["d"]}]
+    assert any(
+        "set_aside[0] needs card_ids and a reason" in e
+        for e in check_synthesis(syn, {"SQ1"}, cards, every_card=True).errors
+    )
+    syn["clusters"].append({"id": "C3", "title": "z", "card_ids": ["c"]})
+    syn["set_aside"] = [{"id": "A1", "card_ids": ["d"], "reason": "studies another task"}]
+    assert not check_synthesis(syn, {"SQ1"}, cards, every_card=True).errors
 
 
 def test_same_direction_portfolio_is_only_a_warning() -> None:

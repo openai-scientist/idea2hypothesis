@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
-STAGE_COUNT = 8
+STAGE_COUNT = 9
 
 
 def stage_dirname(stage: int) -> str:
@@ -146,6 +146,31 @@ class ArtifactStore:
             if hashlib.sha256(data).hexdigest() != entry.get("sha256"):
                 return False
         return True
+
+    # -- partial results --------------------------------------------------
+    # Pieces of a stage's result kept while it runs (a scored batch, a card). They live outside
+    # ``stage-NN`` so a paused or retried stage can reuse them, and are keyed by attempt so a new
+    # attempt never sees them.
+
+    def partial_dir(self, stage: int, attempt: int) -> Path:
+        return self.run_dir / "partial" / stage_dirname(stage) / f"attempt-{attempt}"
+
+    def _partial_path(self, stage: int, attempt: int, name: str) -> Path:
+        base = self.partial_dir(stage, attempt).resolve()
+        target = (base / name).resolve()
+        if target.parent != base:
+            raise ValueError(f"partial name must be a plain file name: {name!r}")
+        return target
+
+    def write_partial(self, stage: int, attempt: int, name: str, obj: Any) -> None:
+        write_json_atomic(self._partial_path(stage, attempt, name), obj)
+
+    def read_partial(self, stage: int, attempt: int, name: str) -> Any | None:
+        """The stored piece, or ``None`` when it is missing or unreadable."""
+        try:
+            return json.loads(self._partial_path(stage, attempt, name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
 
     # -- versioning -------------------------------------------------------
 

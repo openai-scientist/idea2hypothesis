@@ -84,14 +84,22 @@ class SourceRecord:
     source_id: str
     url: str = ""
     retrieved_at: str = field(default_factory=utc_now_iso)
+    #: What this source's own record said, kept when duplicates merge (None: not recorded).
+    citations: int | None = None
+    has_doi: bool | None = None
 
-    def to_dict(self) -> dict[str, str]:
-        return {
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
             "provider": self.provider,
             "source_id": self.source_id,
             "url": self.url,
             "retrieved_at": self.retrieved_at,
         }
+        if self.citations is not None:
+            out["citations"] = self.citations
+        if self.has_doi is not None:
+            out["has_doi"] = self.has_doi
+        return out
 
 
 @dataclass(frozen=True)
@@ -190,6 +198,8 @@ class Paper:
                 source_id=str(r.get("source_id", "")),
                 url=str(r.get("url", "")),
                 retrieved_at=str(r.get("retrieved_at", "")),
+                citations=int(r["citations"]) if r.get("citations") is not None else None,
+                has_doi=bool(r["has_doi"]) if r.get("has_doi") is not None else None,
             )
             for r in data.get("source_records", [])
             if isinstance(r, dict)

@@ -1,4 +1,4 @@
-"""Full run 1 -> 8 with fixture LLM and literature."""
+"""Full run 1 -> 9 with fixture LLM and literature."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ SPEC_ARTIFACTS = {
     6: ["knowledge_meta.json"],
     7: ["synthesis.json", "synthesis.md"],
     8: ["hypotheses.json", "hypotheses.md", "novelty_report.json"],
+    9: ["argument_map.json", "semantic_graph.json", "research_canvas.json"],
 }
 
 
@@ -32,7 +33,7 @@ async def test_full_run_produces_all_spec_artifacts(auto_services) -> None:
     result = await run_pipeline(request(), auto_services)
 
     assert result.status is RunStatus.COMPLETED, result.error
-    assert result.completed_stages == (1, 2, 3, 4, 5, 6, 7, 8)
+    assert result.completed_stages == (1, 2, 3, 4, 5, 6, 7, 8, 9)
 
     run_dir = auto_services.store.run_dir(result.run_id)
     for name in (
@@ -82,7 +83,7 @@ async def test_events_are_sequenced_and_complete(auto_services) -> None:
     assert [e.seq for e in events] == list(range(1, len(events) + 1))
     types = [e.type for e in events]
     assert types[0] == "run.started" and types[-1] == "run.completed"
-    assert types.count("stage.started") == 8 and types.count("stage.completed") == 8
+    assert types.count("stage.started") == 9 and types.count("stage.completed") == 9
     raw = [
         json.loads(line)
         for line in (auto_services.store.run_dir(result.run_id) / "events.jsonl")

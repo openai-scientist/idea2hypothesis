@@ -219,6 +219,50 @@ async def test_reasoning_models_use_max_completion_tokens() -> None:
     assert bodies[0]["max_completion_tokens"] >= 32768 and "max_tokens" not in bodies[0]
 
 
+def sse(*chunks: Any, done: bool = True) -> httpx.Response:
+    lines = [": PROCESSING"] + [f"data: {json.dumps(c)}" for c in chunks]
+    text = "\n\n".join(lines + (["data: [DONE]"] if done else [])) + "\n\n"
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=text)
+
+
+def delta(text: str, finish: str | None = None) -> dict[str, Any]:
+    return {"model": "m-1", "choices": [{"delta": {"content": text}, "finish_reason": finish}]}
+
+
+async def test_streamed_chunks_are_joined_with_their_usage() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        usage = {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 50}}
+        return sse(delta('{"ok": '), delta("true}", "stop"), usage)
+
+    llm, _ = make_llm(handler, pricing=Pricing(1.0, 2.0))
+    response = await llm.chat(USER, json_mode=True)
+    assert response.text == '{"ok": true}' and response.model == "m-1"
+    assert (response.prompt_tokens, response.completion_tokens) == (100, 50)
+    assert response.cost_usd == pytest.approx(0.2)
+    assert bodies[0]["stream"] is True
+    assert bodies[0]["stream_options"] == {"include_usage": True}
+
+
+async def test_a_stream_cut_by_the_token_limit_is_truncated() -> None:
+    llm, _ = make_llm(lambda r: sse(delta("partial", "length")))
+    response = await llm.chat(USER)
+    assert response.text == "partial" and response.truncated
+
+
+async def test_stream_errors_and_empty_streams_are_response_errors() -> None:
+    failing = {"error": {"message": "provider overloaded"}, "choices": []}
+    llm, _ = make_llm(lambda r: sse(delta("x"), failing), max_retries=1)
+    with pytest.raises(LLMResponseError, match="provider overloaded") as info:
+        await llm.chat(USER)
+    assert info.value.retryable
+    llm, _ = make_llm(lambda r: sse(done=True), max_retries=1)
+    with pytest.raises(LLMResponseError, match="missing choices"):
+        await llm.chat(USER)
+
+
 def test_missing_credentials_fail_at_build_time(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("I2H_LLM_API_KEY", raising=False)
     cfg = load_config({"llm": {"model": "m", "base_url": "https://x.test/v1"}})

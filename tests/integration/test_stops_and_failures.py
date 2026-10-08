@@ -78,6 +78,7 @@ async def test_low_topic_score_stops_after_stage_2(tmp_path: Path) -> None:
                 "specificity": 3,
                 "feasibility": 3,
                 "overall": 9,
+                "reasons": {"novelty": "n", "specificity": "s", "feasibility": "f"},
                 "suggestion": "narrow it",
             }
         }

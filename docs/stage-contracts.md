@@ -31,8 +31,9 @@ this run and every listed file still matches its hash.
 | 6 | `KNOWLEDGE_EXTRACT` | `stage-05/shortlist.jsonl` | `cards/<card_id>.json`, `cards/<card_id>.md`, `knowledge_meta.json` | `INVALID_CARDS` |
 | 7 | `SYNTHESIS` | `stage-06/knowledge_meta.json` and cards, `stage-02/problem_tree.json` | `synthesis.json`, `synthesis.md` | `INVALID_SYNTHESIS` |
 | 8 | `HYPOTHESIS_GEN` | `stage-07/synthesis.json`, cards | `hypotheses.json`, `hypotheses.md`, `perspectives/`, `novelty_report.json` (when `research.novelty_check`) | `INVALID_HYPOTHESES` |
+| 9 | `ARGUMENT_MAP` | `stage-08/hypotheses.json`, `stage-07/synthesis.json` | `argument_map.json`, `semantic_graph.json`, `research_canvas.json` | `INVALID_ARGUMENT_MAP` |
 
-Stage 8 is the end of the pipeline. Other failure codes a run can end with:
+Stage 9 is the end of the pipeline. Other failure codes a run can end with:
 `TOPIC_NOT_RESEARCHABLE` (stage 1), `TOPIC_BELOW_THRESHOLD` (stage 2, overall topic score below
 `research.min_topic_score`), `NO_CARDS` (stage 6), `NO_PERSPECTIVES` (stage 8),
 `LLM_OUTPUT_INVALID` (model output still invalid after repair), `LLM_CONFIG`, `LLM_TIMEOUT`,
@@ -54,7 +55,10 @@ Stage 8 is the end of the pipeline. Other failure codes a run can end with:
 `problem_tree.json`: `sub_questions` (at least 3), each with unique `id`, `text`, integer
 `priority`, `goal_link`, and optional `tests`, `covers`; `priority_ranking` (ids in priority order);
 `risks`. `topic_evaluation.json`: `novelty`, `specificity`, `feasibility` and `overall` in
-`[0, 10]`, `threshold`, `suggestion`. `overall` is computed from the three scores.
+`[0, 10]`, `threshold`, `reasons` (one sentence per score saying what in the topic or goal earned
+it) and `suggestion` (the change that would most raise the weakest score, or a refined topic when
+the run stops). The prompt anchors each score band; novelty is judged before any search, from the
+model's knowledge. `overall` is computed from the three scores.
 
 ## Stage 3: SEARCH_STRATEGY
 
@@ -68,8 +72,10 @@ Stage 8 is the end of the pipeline. Other failure codes a run can end with:
 `candidates.jsonl`: one deduplicated real paper per line:
 `paper_id` (stable, derived from DOI, else arXiv id, else normalised title), `title`, `authors`,
 `year`, `abstract`, `venue`, `citation_count`, `doi`, `arxiv_id`, `url`, `cite_key` and
-`source_records[{provider, source_id, url, retrieved_at}]`. Records from several providers for the
-same paper are merged and keep every source record. `references.bib` has exactly one entry per
+`source_records[{provider, source_id, url, retrieved_at, citations, has_doi}]` (`citations` and
+`has_doi` are what that source's own record said). Records from several providers for the same
+paper are merged and keep every source record; the first is the one whose metadata was kept (most
+citations, then the longer abstract), and the others fill its gaps. `references.bib` has exactly one entry per
 candidate. `search_meta.json`: `queries_used` (plan and expansion), `year_min`, `raw`, `unique`,
 `duplicates`, `dropped_without_title`, `per_source` (requests, papers, errors), `per_query`,
 `errors`. A source that fails is recorded here and surfaced as a warning; zero papers from all
@@ -77,10 +83,13 @@ sources fails the stage with `NO_LITERATURE` and stages 5 to 8 do not run.
 
 ## Stage 5: LITERATURE_SCREEN
 
-`review.json`: `rules`, `thresholds`, `summary` (`candidates`, `kept`, `rejected`, `unscored`,
-`prefiltered`), `decisions` (one per candidate: `paper_id`, `decision` in `kept | rejected |
-unscored | prefiltered | dropped_by_reviewer`, `reason`, `relevance_score`, `quality_score`,
-`false_friend`), `human_review`. Papers that never received scores (`unscored`, `prefiltered`) carry
+`review.json`: `rules`, `thresholds` (`min_relevance`, `min_quality`, `max_shortlist`), `summary`
+(`candidates`, `kept`, `rejected`, `below_cutoff`, `unscored`, `prefiltered`), `decisions` (one per
+candidate: `paper_id`, `decision` in `kept | rejected | below_cutoff | unscored | prefiltered |
+dropped_by_reviewer`, `reason`, `relevance_score`, `quality_score`, `false_friend`),
+`human_review`. With `research.max_shortlist` above 0, only that many papers (best relevance, then
+quality) are kept; the others that cleared both bars are `below_cutoff` with their scores and a
+reason. Papers that never received scores (`unscored`, `prefiltered`) carry
 `null` scores and are excluded; they never get default values. `shortlist.jsonl`: the kept
 candidates plus `relevance_score`, `quality_score` in `[0, 1]` and `keep_reason`.
 `screen_meta.json`: `outcome`, counts, `keywords`, batches.
@@ -103,7 +112,9 @@ also has a `.md` rendering. `knowledge_meta.json`: `shortlist_size`, `cards`, `e
 
 `synthesis.json`: `clusters` (`id`, `title`, `card_ids` that exist) and `gaps` (at least 2, each with
 unique `id`, `text`, `sub_question_ids` that exist and `card_ids` that exist), plus the model's
-overview and tensions. Numbers in the text that do not appear in any card are reported as warnings
+overview and tensions. Every card sent to the model is accounted for: it is in exactly one cluster,
+or in `set_aside` (`id`, `card_ids`, `reason`) when it bears on no school of thought; a card in
+neither fails the answer and the model is asked again. Numbers in the text that do not appear in any card are reported as warnings
 (`synthesis mentions '...' which does not appear in any card`).
 
 ## Stage 8: HYPOTHESIS_GEN
@@ -115,18 +126,40 @@ overview and tensions. Numbers in the text that do not appear in any card are re
 threshold or interval), `limitations`, `rationale`, `novelty`, `risk`. `novelty` and `rationale`
 must differ between hypotheses (near-duplicates fail the stage). `perspectives/` holds the
 per-role generations (`<role>.json`), debate rounds (`<role>.r<N>.json`) and `debate_record.json`
-when `llm.debate_rounds > 0`; at least one perspective output must exist or the stage fails with
+when `llm.debate_rounds > 0`. A debate round holds `hypotheses` (revised ones keep their number,
+new ones follow), `responses` (`to` another role, `hypothesis` number, `stance` `challenge` or
+`concede`, `text`; answers that name no such hypothesis are left out with a warning), `revised`
+and `added` (hypothesis numbers); at least one perspective output must exist or the stage fails with
 `NO_PERSPECTIVES`. `disagreements` lists unresolved points between perspectives.
 
 `novelty_report.json` (when enabled): `kind: "novelty_assessment"`, a `disclaimer` stating it is a
 heuristic assessment and not proof of novelty, `novelty_score`, `assessment`, `recommendation`,
 `similar_papers`, `per_hypothesis[{hypothesis_id, closest_paper}]`, search coverage and errors.
 
+## Stage 9: ARGUMENT_MAP
+
+`argument_map.json`: `assessment: "model judgement, not reviewed"`, `evidence_links[{card_id,
+claim_id, relation, rationale}]` with `relation` `supports`, `contradicts` or `unrelated`, every
+card of every cluster judged exactly once against its own cluster; `rationales[{claim_id,
+hypothesis_id, polarity, rationale}]` with `polarity` `supports` or `challenges`, known ids, no pair
+twice, and at least one claim per hypothesis.
+
+`semantic_graph.json`: `ontology`, `entities[{id, type, code, label, text, stage, ...}]` and
+`relations[{id, from, to, relation, polarity?, status, rationale, provenance}]`. Ids are unique,
+types are the seven entity types, each relation keeps the direction its vocabulary gives (for
+example `addresses` reads from a hypothesis to a gap; a flipped edge is an error), `status` is
+`stated`, `derived` or `unreviewed`, and `rationale` and `provenance` are not empty.
+
+`research_canvas.json`: `pieces` holds each of the nine pieces (`puzzle`, `audience`, `question`,
+`theory`, `setting`, `design`, `findings`, `contributions`, `boundaries`) once; a `filled` piece has
+items.
+
 ## Cross-stage references
 
 ```text
 sub-question (stage 2) -> query (3) -> paper (4) -> screening decision (5) -> card (6)
                                                          -> gap (7) -> hypothesis (8)
+                                                         -> argument map (9)
 ```
 
 A reference that does not resolve to a stored record is a contract error. This is what makes a

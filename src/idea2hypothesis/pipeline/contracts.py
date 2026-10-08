@@ -25,7 +25,9 @@ from idea2hypothesis.storage.artifacts import ArtifactStore
 SCHEMA_VERSION = 1
 PREDICTIONS = ("> 0", "< 0", "≠ 0")
 EVIDENCE_SCOPES = ("abstract", "full_text")
-DECISIONS = ("kept", "rejected", "unscored", "prefiltered", "dropped_by_reviewer")
+DECISIONS = (
+    "kept", "rejected", "below_cutoff", "unscored", "prefiltered", "dropped_by_reviewer"
+)  # fmt: skip
 CARD_FIELDS = ("problem", "method", "data", "metrics", "findings", "limitations")
 CARD_CONTENT_FIELDS = ("problem", "method", "findings", "limitations")
 MIN_SUB_QUESTIONS = 3
@@ -136,7 +138,9 @@ def check_problem_tree(tree: Any) -> Findings:
     return f
 
 
-def check_topic_evaluation(evaluation: Any) -> Findings:
+def check_topic_evaluation(evaluation: Any, *, require_reasons: bool = False) -> Findings:
+    """``require_reasons``: the model's answer must explain each score (runs stored before
+    reasons existed are not re-judged)."""
     f = Findings()
     if not f.require(isinstance(evaluation, dict), "topic evaluation must be a JSON object"):
         return f
@@ -146,6 +150,14 @@ def check_topic_evaluation(evaluation: Any) -> Findings:
             isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 10,
             f"topic_evaluation.{key} must be a number between 0 and 10",
         )
+    if require_reasons:
+        reasons = evaluation.get("reasons")
+        for key in ("novelty", "specificity", "feasibility"):
+            f.require(
+                isinstance(reasons, dict) and _text(reasons.get(key)),
+                f"topic_evaluation.reasons.{key} must say what earned the score",
+            )
+        f.require(_text(evaluation.get("suggestion")), "topic_evaluation.suggestion is required")
     return f
 
 
@@ -295,13 +307,40 @@ def check_card(card: Any, shortlist_ids: set[str]) -> Findings:
     return f
 
 
+def _set_aside_ids(f: Findings, raw: Any, known_cards: set[str]) -> list[str]:
+    """Cards the synthesis set aside, each entry with its reason."""
+    if raw is None or raw == []:
+        return []
+    if not f.require(isinstance(raw, list), "set_aside must be a list"):
+        return []
+    ids: list[str] = []
+    for i, item in enumerate(raw):
+        ok = (
+            isinstance(item, dict) and _str_list(item.get("card_ids")) and _text(item.get("reason"))
+        )
+        if f.require(ok, f"set_aside[{i}] needs card_ids and a reason"):
+            f.require(
+                set(item["card_ids"]) <= known_cards, f"set_aside[{i}] references unknown cards"
+            )
+            ids += item["card_ids"]
+    return ids
+
+
 def check_synthesis(
-    synthesis: Any, known_sq: set[str], known_cards: set[str], source_text: str = ""
+    synthesis: Any,
+    known_sq: set[str],
+    known_cards: set[str],
+    source_text: str = "",
+    *,
+    every_card: bool = False,
 ) -> Findings:
+    """``every_card``: each known card is in a cluster or set aside with a reason (stage 7
+    accounts for every card it sent)."""
     f = Findings()
     if not f.require(isinstance(synthesis, dict), "synthesis must be an object"):
         return f
     clusters = synthesis.get("clusters")
+    placed: list[str] = []
     if f.require(isinstance(clusters, list) and clusters, "at least one cluster is required"):
         for i, cluster in enumerate(clusters):
             ok = (
@@ -314,6 +353,18 @@ def check_synthesis(
             ids = cluster.get("card_ids")
             if f.require(_str_list(ids), f"clusters[{i}] needs card_ids"):
                 f.require(set(ids) <= known_cards, f"clusters[{i}] references unknown cards")
+                placed += ids
+    if every_card:
+        placed += _set_aside_ids(f, synthesis.get("set_aside"), known_cards)
+        missing = sorted(known_cards - set(placed))
+        if missing:
+            f.error(
+                f"{len(missing)} cards are in no cluster and not set aside: {', '.join(missing)}; "
+                "put each card in exactly one cluster, or in set_aside with a reason"
+            )
+    twice = sorted({c for c in placed if placed.count(c) > 1})
+    if twice:
+        f.warn(f"cards placed more than once: {', '.join(twice)}")
     gaps = synthesis.get("gaps")
     if f.require(
         isinstance(gaps, list) and len(gaps) >= MIN_GAPS,
@@ -428,6 +479,165 @@ def unsupported_numbers(text: str, source_text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+# --- Stage 9: argument map -------------------------------------------------------------------
+
+#: Each relation of the argument map, read from ``from`` to ``to``, with its domain and range.
+MAP_VOCABULARY: dict[str, tuple[str, str]] = {
+    "supports": ("evidence", "claim"),
+    "contradicts": ("evidence", "claim"),
+    "substantiates": ("claim", "gap"),
+    "motivates": ("gap", "question"),
+    "decomposes_into": ("question", "question"),
+    "proposes_answer_to": ("hypothesis", "question"),
+    "provides_rationale_for": ("claim", "hypothesis"),
+    "depends_on": ("hypothesis", "assumption"),
+    "addresses": ("hypothesis", "gap"),
+    "informs": ("hypothesis", "contribution"),
+    "targets": ("contribution", "gap"),
+}
+MAP_ENTITY_TYPES = (
+    "gap", "question", "hypothesis", "claim", "evidence", "assumption", "contribution"
+)  # fmt: skip
+#: ``stated`` by a record of the run, ``derived`` from other relations, or a model judgement
+#: nobody has reviewed.
+RELATION_STATUSES = ("stated", "derived", "unreviewed")
+EVIDENCE_RELATIONS = ("supports", "contradicts", "unrelated")
+POLARITIES = ("supports", "challenges")
+CANVAS_PIECES = (
+    "puzzle", "audience", "question", "theory", "setting", "design", "findings", "contributions",
+    "boundaries",
+)  # fmt: skip
+
+
+def _text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def check_argument_map(
+    data: Any, members: dict[str, set[str]], hypothesis_ids: set[str]
+) -> Findings:
+    """The model's judgements for the argument map.
+
+    ``members`` maps each cluster (claim) id to its card ids. Every card is judged once against
+    its own cluster's claim; every hypothesis gets at least one claim as its rationale.
+    """
+    f = Findings()
+    if not f.require(isinstance(data, dict), "the argument map must be an object"):
+        return f
+    links = data.get("evidence_links")
+    judged: set[tuple[str, str]] = set()
+    if f.require(isinstance(links, list), "evidence_links must be a list"):
+        for i, link in enumerate(links):
+            if not isinstance(link, dict):
+                f.error(f"evidence_links[{i}] must be an object")
+                continue
+            card, claim = str(link.get("card_id")), str(link.get("claim_id"))
+            if card not in members.get(claim, set()):
+                f.error(f"evidence_links[{i}]: {card} is not a card of cluster {claim}")
+                continue
+            if (card, claim) in judged:
+                f.error(f"evidence_links[{i}]: {card} is judged twice against {claim}")
+            judged.add((card, claim))
+            f.require(
+                link.get("relation") in EVIDENCE_RELATIONS,
+                f"evidence_links[{i}].relation must be one of {', '.join(EVIDENCE_RELATIONS)}",
+            )
+            f.require(_text(link.get("rationale")), f"evidence_links[{i}].rationale is empty")
+        missing = sorted(
+            f"{card} in {claim}"
+            for claim, cards in members.items()
+            for card in cards
+            if (card, claim) not in judged
+        )
+        f.require(not missing, f"cards not judged against their claim: {', '.join(missing)}")
+    rationales = data.get("rationales")
+    grounded: set[str] = set()
+    pairs: set[tuple[str, str]] = set()
+    if f.require(isinstance(rationales, list), "rationales must be a list"):
+        for i, r in enumerate(rationales):
+            if not isinstance(r, dict):
+                f.error(f"rationales[{i}] must be an object")
+                continue
+            claim, hyp = str(r.get("claim_id")), str(r.get("hypothesis_id"))
+            known_claim = f.require(claim in members, f"rationales[{i}]: unknown claim {claim}")
+            known_hyp = f.require(
+                hyp in hypothesis_ids, f"rationales[{i}]: unknown hypothesis {hyp}"
+            )
+            if not (known_claim and known_hyp):
+                continue
+            if (claim, hyp) in pairs:
+                f.error(f"rationales[{i}]: {claim} is tied to {hyp} twice")
+            pairs.add((claim, hyp))
+            grounded.add(hyp)
+            f.require(
+                r.get("polarity") in POLARITIES,
+                f"rationales[{i}].polarity must be supports or challenges",
+            )
+            f.require(_text(r.get("rationale")), f"rationales[{i}].rationale is empty")
+        ungrounded = sorted(hypothesis_ids - grounded)
+        f.require(not ungrounded, f"hypotheses with no claim as rationale: {', '.join(ungrounded)}")
+    return f
+
+
+def check_semantic_graph(graph: Any) -> Findings:
+    """Entities and relations keep to the vocabulary; every relation carries its reasons."""
+    f = Findings()
+    if not f.require(isinstance(graph, dict), "the semantic graph must be an object"):
+        return f
+    entities = graph.get("entities")
+    relations = graph.get("relations")
+    if not f.require(isinstance(entities, list) and entities, "entities must be a non-empty list"):
+        return f
+    if not f.require(isinstance(relations, list), "relations must be a list"):
+        return f
+    types: dict[str, str] = {}
+    for e in entities:
+        if not isinstance(e, dict) or not _text(e.get("id")):
+            f.error("every entity needs an id")
+            continue
+        if e["id"] in types:
+            f.error(f"entity {e['id']} appears twice")
+        f.require(e.get("type") in MAP_ENTITY_TYPES, f"entity {e['id']}: unknown type")
+        types[e["id"]] = str(e.get("type"))
+    seen: set[str] = set()
+    for r in relations:
+        if not isinstance(r, dict):
+            f.error("every relation must be an object")
+            continue
+        rid = str(r.get("id"))
+        if rid in seen:
+            f.error(f"relation {rid} appears twice")
+        seen.add(rid)
+        rule = MAP_VOCABULARY.get(str(r.get("relation")))
+        if rule is None:
+            f.error(f"relation {rid}: {r.get('relation')!r} is not in the vocabulary")
+            continue
+        ends = (types.get(str(r.get("from"))), types.get(str(r.get("to"))))
+        f.require(ends == rule, f"relation {rid} must read from {rule[0]} to {rule[1]}")
+        f.require(r.get("status") in RELATION_STATUSES, f"relation {rid}: unknown status")
+        f.require(
+            _text(r.get("rationale")) and _text(r.get("provenance")),
+            f"relation {rid} needs a rationale and a provenance",
+        )
+    return f
+
+
+def check_research_canvas(canvas: Any) -> Findings:
+    f = Findings()
+    pieces = canvas.get("pieces") if isinstance(canvas, dict) else None
+    if not f.require(isinstance(pieces, list), "the research canvas must list its pieces"):
+        return f
+    ids = [p.get("id") for p in pieces if isinstance(p, dict)]
+    f.require(
+        sorted(map(str, ids)) == sorted(CANVAS_PIECES),
+        "the research canvas must hold each of its nine pieces once",
+    )
+    for p in pieces:
+        if isinstance(p, dict) and p.get("status") == "filled":
+            f.require(p.get("items"), f"canvas piece {p.get('id')} is filled but empty")
+    return f
+
+
 @dataclass(frozen=True)
 class StageContract:
     stage: Stage
@@ -494,6 +704,15 @@ CONTRACTS: dict[Stage, StageContract] = {
         ("hypotheses.json", "hypotheses.md"),
         ">=2 falsifiable hypotheses with gap, evidence references and falsification criteria",
         "INVALID_HYPOTHESES",
+    ),
+    Stage.ARGUMENT_MAP: StageContract(
+        Stage.ARGUMENT_MAP,
+        ((Stage.HYPOTHESIS_GEN, "hypotheses.json"), (Stage.SYNTHESIS, "synthesis.json")),
+        ("argument_map.json", "semantic_graph.json", "research_canvas.json"),
+        "Every clustered card judged against its claim and every hypothesis grounded in a claim; "
+        "relations within the vocabulary, each with rationale, provenance and status; nine "
+        "canvas pieces",
+        "INVALID_ARGUMENT_MAP",
     ),
 }
 
@@ -696,6 +915,29 @@ def _v_hypothesis_gen(ld: _Loader, f: Findings) -> None:
         )
 
 
+def cluster_members(synthesis: dict[str, Any]) -> dict[str, set[str]]:
+    return {
+        str(c["id"]): {str(x) for x in c.get("card_ids", [])}
+        for c in synthesis.get("clusters", [])
+        if isinstance(c, dict) and "id" in c
+    }
+
+
+def _v_argument_map(ld: _Loader, f: Findings) -> None:
+    synthesis = ld.json(Stage.SYNTHESIS, "synthesis.json")
+    hypotheses = ld.json(Stage.HYPOTHESIS_GEN, "hypotheses.json")
+    judged = ld.json(Stage.ARGUMENT_MAP, "argument_map.json")
+    if isinstance(synthesis, dict) and isinstance(hypotheses, dict) and judged is not None:
+        ids = {str(h.get("id")) for h in hypotheses.get("hypotheses", []) if isinstance(h, dict)}
+        f.extend(check_argument_map(judged, cluster_members(synthesis), ids))
+    graph = ld.json(Stage.ARGUMENT_MAP, "semantic_graph.json")
+    if graph is not None:
+        f.extend(check_semantic_graph(graph))
+    canvas = ld.json(Stage.ARGUMENT_MAP, "research_canvas.json")
+    if canvas is not None:
+        f.extend(check_research_canvas(canvas))
+
+
 _VALIDATORS: dict[Stage, Callable[[_Loader, Findings], None]] = {
     Stage.TOPIC_INIT: _v_topic_init,
     Stage.PROBLEM_DECOMPOSE: _v_problem_decompose,
@@ -705,6 +947,7 @@ _VALIDATORS: dict[Stage, Callable[[_Loader, Findings], None]] = {
     Stage.KNOWLEDGE_EXTRACT: _v_knowledge_extract,
     Stage.SYNTHESIS: _v_synthesis,
     Stage.HYPOTHESIS_GEN: _v_hypothesis_gen,
+    Stage.ARGUMENT_MAP: _v_argument_map,
 }
 
 

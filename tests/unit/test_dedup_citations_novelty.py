@@ -26,6 +26,21 @@ def mk(title: str, provider: str, sid: str, **kw: object) -> Paper:
     )
 
 
+def test_each_merged_record_keeps_what_its_source_said() -> None:
+    papers = [
+        mk("Sparse attention", "arxiv", "2301.1", arxiv_id="2301.1", citation_count=0),
+        mk("Sparse attention", "openalex", "W9", doi="10.1/s", citation_count=40),
+        mk("Sparse attention", "openalex", "W9", doi="10.1/s", citation_count=40),  # same record
+    ]
+    (paper,), removed = deduplicate(papers)
+    assert removed == 2
+    kept, other = paper.source_records  # the record whose metadata was kept comes first
+    assert (kept.provider, kept.citations, kept.has_doi) == ("openalex", 40, True)
+    assert (other.provider, other.citations, other.has_doi) == ("arxiv", 0, False)
+    again = Paper.from_dict(paper.to_dict())
+    assert again.source_records == paper.source_records
+
+
 def test_normalisers() -> None:
     assert normalise_doi("https://doi.org/10.1000/ABC") == "10.1000/abc"
     assert normalise_doi("doi:10.1/x ") == "10.1/x"

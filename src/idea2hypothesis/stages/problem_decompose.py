@@ -56,9 +56,13 @@ async def run(ctx: StageContext) -> list[str]:
 
     eval_prompt = ctx.prompts.render("topic_evaluation", topic=ctx.topic, goal_json=goal_json)
     evaluation, eval_warnings = await request_json(
-        ctx, eval_prompt, label="topic_evaluation", validate=check_topic_evaluation
+        ctx,
+        eval_prompt,
+        label="topic_evaluation",
+        validate=lambda d: check_topic_evaluation(d, require_reasons=True),
     )
-    scores = [float(evaluation[k]) for k in ("novelty", "specificity", "feasibility")]
+    dims = ("novelty", "specificity", "feasibility")
+    scores = [float(evaluation[k]) for k in dims]
     overall = round(sum(scores) / 3.0, 1)
     evaluation = {
         "schema_version": 1,
@@ -67,7 +71,8 @@ async def run(ctx: StageContext) -> list[str]:
         "feasibility": evaluation["feasibility"],
         "overall": overall,
         "threshold": ctx.config.research.min_topic_score,
-        "suggestion": evaluation.get("suggestion") or "",
+        "reasons": {k: str(evaluation["reasons"][k]).strip() for k in dims},
+        "suggestion": str(evaluation["suggestion"]).strip(),
     }
 
     ctx.artifacts.write_json(STAGE, "problem_tree.json", tree)

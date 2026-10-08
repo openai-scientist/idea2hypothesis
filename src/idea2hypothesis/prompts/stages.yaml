@@ -1,4 +1,4 @@
-# Stage prompts for the eight idea -> hypothesis stages (default "ml" domain).
+# Stage prompts for the idea -> hypothesis stages and the argument map (default "ml" domain).
 #
 # Syntax:
 #   {{name}}      variable, substituted at render time (missing variable -> PromptError)
@@ -128,8 +128,17 @@ stages:
       venue. Score honestly; weak topics must receive low scores.
     user: |
       Evaluate this research topic and its goal. Score 1-10 on novelty, specificity and
-      feasibility; "overall" is their mean rounded to one decimal. If overall is below 5, suggest
-      a refined topic in "suggestion".
+      feasibility; "overall" is their mean rounded to one decimal. No literature has been searched
+      yet, so judge novelty from what you know of the field.
+      novelty: 9-10 an open question nobody has settled; 7-8 studied, but this angle or setting is
+        open; 5-6 well studied, the contribution is an update or a replication; 1-4 already answered.
+      specificity: 9-10 every variable, population and measure is named; 7-8 the main measures are
+        named; 5-6 some terms are vague; 1-4 too broad to test.
+      feasibility: 9-10 public data and modest compute suffice; 7-8 doable with effort or access the
+        goal assumes; 5-6 needs resources the goal does not mention; 1-4 out of reach.
+      In "reasons" give one sentence per score that names what in the topic or goal earned it.
+      In "suggestion" give the one change that would most raise the weakest score; if overall is
+      below 5, give a refined topic instead.
 
       Topic: {{topic}}
       Goal:
@@ -137,7 +146,7 @@ stages:
 
       {{> json_rules}}
       Schema:
-      {"novelty": 7, "specificity": 7, "feasibility": 7, "overall": 7.0, "suggestion": "..."}
+      {"novelty": 7, "specificity": 7, "feasibility": 7, "overall": 7.0, "reasons": {"novelty": "...", "specificity": "...", "feasibility": "..."}, "suggestion": "..."}
 
   problem_decompose:
     json_mode: true
@@ -233,12 +242,29 @@ stages:
          introduced techniques still in use.
       5. QUALITY FLOOR: lower quality_score for papers with no abstract, no venue or no citations
          (they may not be real scholarly work).
-      Scores are floats in [0, 1]. "decision" is "keep" or "reject". Give a one-sentence "reason"
-      for every paper (do not start it with "Kept because").
+
+      SCORES are separate from the decision. Score each paper on the anchors below first, then
+      decide with the rules above. A paper that uses the topic's own terms for a problem in another
+      field scores high on relevance and is still rejected under rule 3; never lower its score to
+      justify the rejection.
+      relevance_score: how directly the title and abstract address the topic's question.
+        0.90-1.00 studies the question itself: same task, setting and outcome.
+        0.70-0.89 same task or setting; its method, data or findings bear directly on the question.
+        0.50-0.69 a neighbouring problem; background, not direct evidence.
+        0.30-0.49 shares a technique or a term, not the problem.
+        0.00-0.29 unrelated.
+      quality_score: how much the record lets a reader trust and use the work.
+        0.85-1.00 peer-reviewed venue, abstract states method and results, cited by others.
+        0.65-0.84 venue or established preprint server; abstract states method and results.
+        0.45-0.64 workshop, thesis or preprint, or an abstract thin on method or results.
+        0.00-0.44 no abstract, no venue, or not clearly scholarly work.
+      Write scores with two decimals (for example 0.83 or 0.71) and place each paper within its
+      band; do not round to steps of 0.05 or 0.1. "decision" is "keep" or "reject". Give a
+      one-sentence "reason" for every paper (do not start it with "Kept because").
 
       {{> json_rules}}
       Schema:
-      {"screened": [{"paper_id": "p-...", "decision": "keep", "relevance_score": 0.85, "quality_score": 0.7, "reason": "...", "false_friend": null}]}
+      {"screened": [{"paper_id": "p-...", "decision": "keep", "relevance_score": 0.83, "quality_score": 0.71, "reason": "...", "false_friend": null}]}
 
       Papers:
       {{candidates_json}}
@@ -284,6 +310,10 @@ stages:
       - At least 2 clusters and at least 2 research gaps.
       - Every cluster and gap lists the `card_ids` that support it; use only card ids that appear
         below.
+      - Account for ALL the cards: every card below goes in exactly one cluster, or in
+        "set_aside" when it bears on no school of thought about the topic (for example it studies
+        another task); give the reason there. Do not stretch a cluster to hold a card that does
+        not belong in it, and never leave a card out of both.
       - Every gap lists the `sub_question_ids` from the problem tree that it relates to and says
         why it is prioritised. A gap is a limitation or missing piece visible in the cards, not a
         generic wish.
@@ -306,7 +336,7 @@ stages:
         "tensions": [{"between": ["C1", "C2"], "text": "..."}],
         "gaps": [{"id": "G1", "text": "...", "sub_question_ids": ["SQ1"], "card_ids": ["card-p-..."], "why_prioritized": "...", "priority": 1}],
         "prioritized_opportunities": [{"gap_id": "G1", "direction": "..."}],
-        "set_aside": [{"id": "A1", "statement": "...", "reason": "..."}]
+        "set_aside": [{"id": "A1", "card_ids": ["card-p-..."], "reason": "..."}]
       }
 
   hypothesis_gen:
@@ -351,6 +381,45 @@ stages:
       {{> json_rules}}
       Return {"hypotheses": [ ... ], "disagreements": ["unresolved disagreement between perspectives", ...]}
 
+  argument_map:
+    json_mode: true
+    max_tokens: 8192
+    system: |
+      You review the argument behind a set of research hypotheses. You judge how each piece of
+      evidence bears on the claim it was grouped under, and which claims in the literature give
+      each hypothesis a reason to hold or a reason to doubt it. You judge only from the text
+      given to you.
+    user: |
+      Judge how the evidence bears on each claim, and which claims ground each hypothesis.
+
+      1. Evidence links. Each claim below lists the cards grouped under it. Judge EVERY card
+         once, against that claim only:
+         - "supports": the card's findings back the claim;
+         - "contradicts": the findings go against the claim, or show it holds only in part;
+         - "unrelated": the findings do not bear on the claim after all.
+         The rationale says, in one sentence, what in the findings decides it.
+      2. Rationales. For each hypothesis, list the claims that give it a reason to expect its
+         prediction ("supports") or a reason to doubt it ("challenges"). Every hypothesis needs
+         at least one claim. Do not tie a claim that says nothing about the hypothesis.
+         The rationale says, in one sentence, how the claim bears on the hypothesis.
+      - Use only the claim, card and hypothesis ids given below.
+      - Do NOT introduce numbers that are not in the text below.
+
+      Topic: {{topic}}
+      {{domain_guidance}}
+      Claims and their cards:
+      {{claims_json}}
+
+      Hypotheses:
+      {{hypotheses_json}}
+
+      {{> json_rules}}
+      Schema:
+      {
+        "evidence_links": [{"card_id": "card-p-...", "claim_id": "C1", "relation": "supports | contradicts | unrelated", "rationale": "..."}],
+        "rationales": [{"claim_id": "C1", "hypothesis_id": "H1", "polarity": "supports | challenges", "rationale": "..."}]
+      }
+
 sub_prompts:
   debate_rebuttal:
     json_mode: true
@@ -360,10 +429,10 @@ sub_prompts:
       seen the other perspectives. Push back on their weak points, defend or REVISE your own
       position with evidence, and concede where they are right. Be rigorous, not stubborn.
     user: |
-      Your previous position ({{role}}):
+      Your previous position ({{role}}), numbered:
       {{own_position}}
 
-      Other perspectives this round:
+      Other perspectives this round, each under its name and numbered:
       {{others}}
 
       Allowed evidence references: {{valid_refs}}
@@ -371,11 +440,18 @@ sub_prompts:
       Synthesis the hypotheses must stay grounded in:
       {{synthesis_json}}
 
-      Write your updated position. Keep the same hypothesis schema and keep gap_id and
-      evidence_refs valid.
+      First answer the other perspectives point by point in "responses". Each answer is about one
+      of their hypotheses: "to" is the perspective's name as written after ###, "hypothesis" is
+      that hypothesis's number, "stance" is "challenge" (a weak point: a confound, a claim the
+      cards do not support, a test that cannot fail) or "concede" (it is right and you take it
+      on board), and "text" says why in one or two sentences. Do not name perspectives inside
+      "text"; "to" already says whom you answer.
+      Then write your updated position. Keep your hypotheses in their numbered order: a revised
+      hypothesis keeps its number and new ones go at the end. Keep the same hypothesis schema and
+      keep gap_id and evidence_refs valid.
       {{> hypothesis_schema}}
       {{> json_rules}}
-      Return {"hypotheses": [ ... ], "concessions": ["points you conceded", ...]}
+      Return {"responses": [{"to": "<perspective>", "hypothesis": 1, "stance": "challenge", "text": "..."}], "hypotheses": [ ... ]}
 
   debate_judge:
     json_mode: true

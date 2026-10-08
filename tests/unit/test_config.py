@@ -108,7 +108,7 @@ def test_load_from_yaml_file_and_errors(tmp_path: Path) -> None:
 
 def test_platform_local_config_matches_the_platform_be_setup() -> None:
     cfg = load_config(EXAMPLE.with_name("platform-local.yaml"))
-    assert cfg.llm.provider == "bedrock"
+    assert cfg.llm.provider in ("bedrock", "openai_compatible")  # the router block is switchable
     assert (cfg.api.host, cfg.api.port) == ("0.0.0.0", 8001)
     assert {"localhost", "host.docker.internal"} <= set(cfg.api.callback_allowed_hosts)
     assert (cfg.api.service_key_env, cfg.api.callback_key_env) == (

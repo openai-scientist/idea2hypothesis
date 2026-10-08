@@ -26,6 +26,41 @@ from idea2hypothesis.storage.runs import utc_now
 logger = logging.getLogger(__name__)
 
 STAGE = 8
+#: How a rebuttal answers one hypothesis of another perspective.
+RESPONSE_STANCES = ("challenge", "concede")
+
+
+def _numbered(hyps: list[dict[str, Any]]) -> str:
+    return "\n".join(f"{i}. {compact_json(h)}" for i, h in enumerate(hyps, 1))
+
+
+def _responses(
+    raw: Any, previous: dict[str, list[dict[str, Any]]], role: str
+) -> tuple[list[dict[str, Any]], int]:
+    """Answers that name another perspective and one of its numbered hypotheses; and how many
+    were dropped because they did not."""
+    kept: list[dict[str, Any]] = []
+    items = raw if isinstance(raw, list) else []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        to = str(item.get("to") or "").strip().lower()
+        n = item.get("hypothesis")
+        if isinstance(n, str) and n.strip().isdigit():
+            n = int(n)
+        text = str(item.get("text") or "").strip()
+        if (
+            to == role
+            or to not in previous
+            or isinstance(n, bool)
+            or not isinstance(n, int)
+            or not 1 <= n <= len(previous[to])
+            or item.get("stance") not in RESPONSE_STANCES
+            or not text
+        ):
+            continue
+        kept.append({"to": to, "hypothesis": n, "stance": item["stance"], "text": text})
+    return kept, len(items) - len(kept)
 
 
 def normalise_hypotheses(data: dict[str, Any]) -> None:
@@ -104,29 +139,36 @@ async def _generate_perspectives(
     roles = ctx.prompts.role_names()
 
     async def one(role: str) -> tuple[str, list[dict[str, Any]] | None]:
-        prompt = ctx.prompts.render_role(role, **variables)
-        try:
-            data, _ = await request_json(
-                ctx, prompt, label=f"perspective {role}", validate=check_perspective
+        # A perspective written before a pause or a retried try of this attempt is reused.
+        hyps = ctx.artifacts.read_partial(STAGE, ctx.attempt, f"perspective-{role}.json")
+        if not isinstance(hyps, list):
+            prompt = ctx.prompts.render_role(role, **variables)
+            try:
+                data, _ = await request_json(
+                    ctx, prompt, label=f"perspective {role}", validate=check_perspective
+                )
+            except StageFailure as exc:
+                warnings.append(f"perspective {role} failed: {exc.message}")
+                return role, None
+            hyps = [h for h in data["hypotheses"] if isinstance(h, dict)]
+            ctx.artifacts.write_partial(STAGE, ctx.attempt, f"perspective-{role}.json", hyps)
+        if hyps:
+            ctx.artifacts.write_json(
+                STAGE, f"perspectives/{role}.json", {"role": role, "round": 0, "hypotheses": hyps}
             )
-        except StageFailure as exc:
-            warnings.append(f"perspective {role} failed: {exc.message}")
-            return role, None
-        return role, [h for h in data["hypotheses"] if isinstance(h, dict)]
+            ctx.artifacts.write_text(
+                STAGE, f"perspectives/{role}.md", _perspective_markdown(role, hyps)
+            )
+            await ctx.progress("perspective", file=f"perspectives/{role}.json", role=role, round=0)
+        return role, hyps
 
+    await ctx.progress("perspectives_plan", roles=list(roles))
     results = await gather_limited(
         [lambda r=r: one(r) for r in roles], ctx.config.runtime.concurrency
     )
     current = {role: hyps for role, hyps in results if hyps}
     if not current:
         raise StageFailure("NO_PERSPECTIVES", "no perspective produced usable hypotheses")
-    for role, hyps in current.items():
-        ctx.artifacts.write_json(
-            STAGE, f"perspectives/{role}.json", {"role": role, "round": 0, "hypotheses": hyps}
-        )
-        ctx.artifacts.write_text(
-            STAGE, f"perspectives/{role}.md", _perspective_markdown(role, hyps)
-        )
     return current
 
 
@@ -148,14 +190,12 @@ async def _debate(
             role: str, previous: dict[str, Any] = previous, r: int = r
         ) -> tuple[str, Any]:
             others = "\n\n---\n\n".join(
-                f"### {other}\n{compact_json(previous[other])}"
-                for other in previous
-                if other != role
+                f"### {other}\n{_numbered(previous[other])}" for other in previous if other != role
             )
             prompt = ctx.prompts.render(
                 "debate_rebuttal",
                 role=role,
-                own_position=compact_json(previous[role]),
+                own_position=_numbered(previous[role]),
                 others=others,
                 valid_refs=variables["valid_refs"],
                 valid_gaps=variables["valid_gaps"],
@@ -168,6 +208,36 @@ async def _debate(
             except StageFailure as exc:
                 warnings.append(f"debate round {r}: {role} kept its prior position ({exc.message})")
                 return role, None
+            hyps = [h for h in data["hypotheses"] if isinstance(h, dict)]
+            responses, unusable = _responses(data.get("responses"), previous, role)
+            if unusable:
+                warnings.append(
+                    f"debate round {r}: {unusable} answers of {role} named no hypothesis of "
+                    "another perspective and were left out"
+                )
+            before = previous[role]
+            # A revised hypothesis keeps its number; new ones come after the old ones.
+            revised = [
+                i
+                for i, h in enumerate(hyps[: len(before)], 1)
+                if h.get("statement") != before[i - 1].get("statement")
+            ]
+            added = list(range(len(before) + 1, len(hyps) + 1))
+            data["concessions"] = [x["text"] for x in responses if x["stance"] == "concede"]
+            name = f"perspectives/{role}.r{r}.json"
+            ctx.artifacts.write_json(
+                STAGE,
+                name,
+                {
+                    "role": role,
+                    "round": r,
+                    "hypotheses": hyps,
+                    "responses": responses,
+                    "revised": revised,
+                    "added": added,
+                },
+            )
+            await ctx.progress("perspective", file=name, role=role, round=r)
             return role, data
 
         outcomes = await gather_limited(
@@ -176,14 +246,8 @@ async def _debate(
         for role, data in outcomes:
             if data is None:
                 continue
-            hyps = [h for h in data["hypotheses"] if isinstance(h, dict)]
-            current[role] = hyps
+            current[role] = [h for h in data["hypotheses"] if isinstance(h, dict)]
             record["concessions"].setdefault(role, []).extend(data.get("concessions") or [])
-            ctx.artifacts.write_json(
-                STAGE,
-                f"perspectives/{role}.r{r}.json",
-                {"role": role, "round": r, "hypotheses": hyps},
-            )
 
     judge = ctx.reviewer or ctx.llm
     record["independent_judge"] = ctx.reviewer is not None
@@ -205,6 +269,8 @@ async def _debate(
         record["rankings"] = data["rankings"]
         assessment = "Independent reviewer assessment:\n" + compact_json(data["rankings"])
     ctx.artifacts.write_json(STAGE, "perspectives/debate_record.json", record)
+    if record.get("rankings"):
+        await ctx.progress("judged", file="perspectives/debate_record.json")
     return current, assessment, record
 
 
@@ -262,6 +328,7 @@ async def run(ctx: StageContext) -> list[str]:
         normalise_hypotheses(data)
         return check_hypotheses(data, valid_gaps, valid_refs)
 
+    await ctx.progress("merge", perspectives=sorted(current))
     data, soft = await request_json(ctx, prompt, label="hypothesis_gen", validate=validate)
     doc = {
         "schema_version": 1,
@@ -276,6 +343,7 @@ async def run(ctx: StageContext) -> list[str]:
     ctx.artifacts.write_text(STAGE, "hypotheses.md", render_hypotheses_markdown(doc))
 
     if ctx.config.research.novelty_check:
+        await ctx.progress("novelty", hypotheses=len(doc["hypotheses"]))
         queries_doc = ctx.artifacts.read_json(3, "queries.json")
         seen = ctx.artifacts.read_jsonl(4, "candidates.jsonl")
         report = await check_novelty(

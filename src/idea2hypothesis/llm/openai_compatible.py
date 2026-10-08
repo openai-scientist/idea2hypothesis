@@ -1,7 +1,14 @@
-"""OpenAI-compatible chat-completions client built on :mod:`httpx`."""
+"""OpenAI-compatible chat-completions client built on :mod:`httpx`.
+
+Completions are streamed (server-sent events): ``timeout_sec`` bounds the silence between two
+chunks, so a long answer that keeps arriving is never cut off, and ``_STREAM_MAX_SEC`` bounds the
+whole call. A router that ignores ``stream`` and answers with one JSON body is read as before.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from typing import Any
 
@@ -52,6 +59,7 @@ _TRANSIENT_400_HINTS = (
     "retry",
 )
 _USER_AGENT = "idea2hypothesis/0.1"
+_STREAM_MAX_SEC = 900.0
 
 
 class OpenAICompatibleLLM(ChainedLLM):
@@ -88,7 +96,12 @@ class OpenAICompatibleLLM(ChainedLLM):
         temperature: float,
     ) -> dict[str, Any]:
         msgs = [{"role": m.role, "content": m.content} for m in messages]
-        body: dict[str, Any] = {"model": model, "messages": msgs}
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": msgs,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
         if not model.startswith(_NO_TEMPERATURE_MODELS):
             body["temperature"] = temperature
         if model.startswith(_NEW_PARAM_MODELS):
@@ -123,19 +136,73 @@ class OpenAICompatibleLLM(ChainedLLM):
             "User-Agent": _USER_AGENT,
         }
         try:
-            response = await self._client.post(
-                f"{self.base_url}/chat/completions",
-                json=body,
-                headers=headers,
-                timeout=self._timeout,
-            )
+            async with asyncio.timeout(_STREAM_MAX_SEC):
+                return await self._request(model, body, headers)
+        except TimeoutError as exc:
+            raise LLMTimeout(f"{model} did not finish within {_STREAM_MAX_SEC:.0f}s") from exc
         except httpx.TimeoutException as exc:
             raise LLMTimeout(f"timeout calling {model}: {exc!r}") from exc
         except httpx.TransportError as exc:
             raise LLMResponseError(
                 f"transport error calling {model}: {exc!r}", retryable=True
             ) from exc
-        return self._parse(response, model)
+
+    async def _request(
+        self, model: str, body: dict[str, Any], headers: dict[str, str]
+    ) -> RawCompletion:
+        async with self._client.stream(
+            "POST",
+            f"{self.base_url}/chat/completions",
+            json=body,
+            headers=headers,
+            timeout=self._timeout,
+        ) as response:
+            if response.status_code < 400 and "text/event-stream" in response.headers.get(
+                "content-type", ""
+            ):
+                return await self._read_stream(response, model)
+            await response.aread()
+            return self._parse(response, model)
+
+    async def _read_stream(self, response: httpx.Response, model: str) -> RawCompletion:
+        """Join the ``data:`` chunks; comment lines (keep-alives) and ``[DONE]`` carry nothing."""
+        parts: list[str] = []
+        usage: dict[str, Any] = {}
+        finish = ""
+        name = model
+        chunks = 0
+        async for line in response.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                data = json.loads(payload)
+            except ValueError as exc:
+                raise LLMResponseError(f"malformed stream chunk from {model}") from exc
+            if not isinstance(data, dict):
+                continue
+            error = data.get("error")
+            if error:
+                message = error.get("message", str(error)) if isinstance(error, dict) else error
+                raise LLMResponseError(f"{model}: {message}", retryable=True)
+            name = data.get("model") or name
+            usage = data.get("usage") or usage
+            for choice in data.get("choices") or []:
+                chunks += 1
+                parts.append((choice.get("delta") or {}).get("content") or "")
+                finish = choice.get("finish_reason") or finish
+        if not chunks:
+            raise LLMResponseError(f"malformed response from {model}: missing choices")
+        return RawCompletion(
+            text="".join(parts),
+            model=name,
+            prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+            finish_reason=finish,
+            truncated=finish == "length",
+        )
 
     def _parse(self, response: httpx.Response, model: str) -> RawCompletion:
         status = response.status_code

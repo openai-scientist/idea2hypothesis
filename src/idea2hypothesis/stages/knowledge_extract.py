@@ -74,6 +74,10 @@ async def _extract(ctx: StageContext, paper: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _partial_name(paper: dict[str, Any]) -> str:
+    return f"{card_id_for(str(paper['paper_id']))}.json"
+
+
 async def run(ctx: StageContext) -> list[str]:
     shortlist = ctx.artifacts.read_jsonl(5, "shortlist.jsonl")
     if not shortlist:
@@ -86,8 +90,31 @@ async def run(ctx: StageContext) -> list[str]:
         else:
             skipped.append({"paper_id": str(paper["paper_id"]), "reason": "no abstract available"})
 
+    # Cards written before a pause or a retried try of this attempt are reused, not re-extracted.
+    cached: dict[str, dict[str, Any]] = {}
+    for paper in papers:
+        card = ctx.artifacts.read_partial(STAGE, ctx.attempt, _partial_name(paper))
+        if isinstance(card, dict) and card.get("paper_id") == paper["paper_id"]:
+            cached[str(paper["paper_id"])] = card
+    await ctx.progress("cards_plan", total=len(papers), cached=len(cached), skipped=len(skipped))
+    done = 0
+
+    async def extract(paper: dict[str, Any]) -> dict[str, Any]:
+        nonlocal done
+        card = cached.get(str(paper["paper_id"]))
+        if card is None:
+            card = await _extract(ctx, paper)
+            ctx.artifacts.write_partial(STAGE, ctx.attempt, _partial_name(paper), card)
+        done += 1
+        await ctx.progress(
+            "card", partial=_partial_name(paper), card_id=card["card_id"], index=done,
+            total=len(papers),
+        )  # fmt: skip
+        return card
+
+    ordered = sorted(papers, key=lambda p: str(p["paper_id"]) not in cached)
     cards = await gather_limited(
-        [lambda p=p: _extract(ctx, p) for p in papers], ctx.config.runtime.concurrency
+        [lambda p=p: extract(p) for p in ordered], ctx.config.runtime.concurrency
     )
     if not cards:
         raise StageFailure("NO_CARDS", "no shortlisted paper has an abstract to extract from")

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from idea2hypothesis.api.platform_events import GROUPS, PlatformEventLog
+from idea2hypothesis.api.platform_events import GROUPS, PlatformEventLog, _merges
 from idea2hypothesis.storage.runs import RunStore
 from tests.fixtures.api_helpers import SERVER_KEY, Harness, harness
 
@@ -35,12 +35,14 @@ EMITTED = {
     "literature.request",
     "literature.batch",
     "literature.collected",
+    "literature.merged",
     "screen.criteria",
     "screen.scored",
     "screen.rejected",
     "screen.kept",
     "card.extracted",
     "synthesis.cluster",
+    "synthesis.set_aside",
     "synthesis.tension",
     "synthesis.gap",
     "synthesis.overview",
@@ -49,19 +51,21 @@ EMITTED = {
     "hypothesis.drafted",
     "hypothesis.checked",
     "hypothesis.selected",
+    "map.node",
+    "map.edge",
+    "canvas.piece",
     "gate.opened",
     "gate.resolved",
+    "agent.message",
 }
 DROPPED = {
-    "agent.message",
     "skills.loaded",
     "scope.estimate",
     "scope.adjusted",
     "estimate.checked",
     "idea.set_aside",
-    "literature.merged",
 }
-STAGE_KEYS = {"scope", "search", "screen", "read", "synthesize", "r1-hypothesize"}
+STAGE_KEYS = {"scope", "search", "screen", "read", "synthesize", "r1-hypothesize", "map"}
 
 
 @pytest.fixture(autouse=True)
@@ -109,8 +113,9 @@ async def test_plan_and_stage_plans_use_the_ui_groups(tmp_path: Path) -> None:
         ("read", "read", [6]),
         ("synthesize", "synthesize", [7]),
         ("r1-hypothesize", "hypothesize", [8]),
+        ("map", "map", [9]),
     ]
-    assert [s["has_gate"] for s in plan] == [False, False, True, False, False, False]
+    assert [s["has_gate"] for s in plan] == [False, False, True, False, False, False, False]
     assert [g.key for g in GROUPS] == [s["key"] for s in plan]
     started = {e["stage_key"]: e["payload"]["plan"] for e in _of(events, "stage.started")}
     assert list(started) == ["scope", "search", "screen"]  # stops at the gate
@@ -141,7 +146,7 @@ async def test_steps_are_balanced_and_stages_complete_in_order(tmp_path: Path) -
         ]
         assert started == done and started, key
     order = [e["stage_key"] for e in events if e["type"] == "stage.completed"]
-    assert order == ["scope", "search", "screen", "read", "synthesize", "r1-hypothesize"]
+    assert order == ["scope", "search", "screen", "read", "synthesize", "r1-hypothesize", "map"]
     assert events[-1]["type"] == "run.completed" and events[-1]["stage_key"] is None
 
 
@@ -164,6 +169,14 @@ async def test_content_comes_from_the_real_artifacts(tmp_path: Path) -> None:
         meta["duplicates"],
     )
     assert collected["unique"] == len(candidates) == 12
+    merged = [e["payload"] for e in _of(events, "literature.merged")]
+    merged_records = sum(len(m["records"]) - 1 for m in merged)
+    assert collected["repeats"] == meta["duplicates"] - merged_records
+    extra = [q["text"] for q in meta["queries_used"] if q["origin"] == "expansion"]
+    assert collected["expansion"] == {
+        "queries": len(extra),
+        "hits": sum(sum(meta["per_query"][q].values()) for q in extra),
+    }
 
     # one screening point per scored paper, taken from review.json
     points = [p for e in _of(events, "screen.scored") for p in e["payload"]["points"]]
@@ -189,6 +202,9 @@ async def test_content_comes_from_the_real_artifacts(tmp_path: Path) -> None:
         "specificity",
         "feasibility",
     }
+    # every score says what earned it, and the advice is never empty
+    assert set(evaluation["reasons"]) == set(evaluation["scores"])
+    assert all(evaluation["reasons"].values()) and evaluation["advice"]
 
     cards = [e["payload"]["card"] for e in _of(events, "card.extracted")]
     assert sorted(c["paper_id"] for c in cards) == sorted(s["paper_id"] for s in shortlist)
@@ -199,6 +215,13 @@ async def test_content_comes_from_the_real_artifacts(tmp_path: Path) -> None:
     assert [g["id"] for g in gaps] == [g["id"] for g in synthesis["gaps"]]
     card_ids = {c["id"] for c in cards}
     assert all(set(g["from"]) <= card_ids for g in gaps)
+    # every card is in a cluster or set aside with a reason; none is left to sort
+    clustered = [
+        i for e in _of(events, "synthesis.cluster") for i in e["payload"]["cluster"]["card_ids"]
+    ]
+    asides = [e["payload"]["aside"] for e in _of(events, "synthesis.set_aside")]
+    assert asides and all(a["reason"] for a in asides)
+    assert set(clustered) | {i for a in asides for i in a["card_ids"]} == card_ids
     ranking = _of(events, "synthesis.ranked")[0]["payload"]["ranking"]
     assert [r["priority"] for r in ranking] == [1, 2]
 
@@ -230,6 +253,7 @@ async def test_topic_rejected_by_the_evaluation_reports_the_rating_and_stops(
                 "specificity": 2,
                 "feasibility": 3,
                 "overall": 2.4,
+                "reasons": {"novelty": "n", "specificity": "s", "feasibility": "f"},
                 "suggestion": "narrow it",
             }
         }
@@ -294,3 +318,205 @@ async def test_log_is_private_state_free_and_heals_a_torn_tail(tmp_path: Path) -
         again = await h2.events(run_id)
         assert [e["source_seq"] for e in again] == list(range(1, len(again) + 1))
         assert [e["type"] for e in again] == [e["type"] for e in events]
+
+
+async def test_parts_are_sent_while_the_stage_runs(tmp_path: Path) -> None:
+    async with harness(tmp_path) as h:
+        run_id, events = await _completed(h)
+        rows = h.service.log._load(run_id)
+        core = {e.seq: e for e in h.service.store.read_events(run_id)}
+    by_type = lambda t: [r for r in rows if r["type"] == t]  # noqa: E731
+    cards = by_type("card.extracted")
+    # one progress event per card, each sent before the stage completed
+    assert len({r["_core_seq"] for r in cards}) == len(cards) > 1
+    assert all(core[r["_core_seq"]].type == "stage.progress" for r in cards)
+    read_done = next(r for r in by_type("stage.completed") if r["stage_key"] == "read")
+    assert all(r["source_seq"] < read_done["source_seq"] for r in cards)
+    for kind in ("screen.scored", "literature.batch", "debate.turn", "hypothesis.drafted"):
+        assert any(core[r["_core_seq"]].type == "stage.progress" for r in by_type(kind)), kind
+
+
+async def test_no_part_is_sent_twice(tmp_path: Path) -> None:
+    async with harness(tmp_path) as h:
+        _, events = await _completed(h)
+
+    def ids(type_: str, pick) -> list[str]:
+        return [pick(e["payload"]) for e in _of(events, type_)]
+
+    for type_, pick in (
+        ("card.extracted", lambda p: p["card"]["id"]),
+        ("screen.rejected", lambda p: p["paper"]["id"]),
+        ("screen.kept", lambda p: p["paper"]["id"]),
+        ("debate.turn", lambda p: p["turn"]["id"]),
+        ("hypothesis.drafted", lambda p: p["hypothesis"]["id"]),
+        ("screen.criteria", lambda p: "criteria"),
+    ):
+        found = ids(type_, pick)
+        assert found and len(found) == len(set(found)), type_
+    cells = [(p["query_id"], p["source_id"]) for p in map(lambda e: e["payload"], events)
+             if "query_id" in p and "hits" in p]  # fmt: skip
+    assert len(cells) == len(set(cells))
+    points = [p["id"] for e in _of(events, "screen.scored") for p in e["payload"]["points"]]
+    assert len(points) == len(set(points))
+
+
+async def test_every_narration_line_is_closed_and_comes_from_the_records(tmp_path: Path) -> None:
+    async with harness(tmp_path) as h:
+        run_id, events = await _completed(h)
+        art = h.service.store.artifacts(run_id)
+        summary = art.read_json(5, "review.json")["summary"]
+        cards = len([n for n in art.list_files(6) if n.endswith(".json") and "cards/" in n])
+    lines = _of(events, "agent.message")
+    assert lines and all(e["payload"]["text"].strip() and e["actor"] for e in lines)
+    last: dict[str, dict[str, Any]] = {}
+    for e in lines:
+        last[e["payload"]["message_id"]] = e["payload"]
+    assert all(p.get("done") for p in last.values())  # no line is left "in progress"
+    done = [p["text"] for p in last.values()]
+    assert f"Kept {summary['kept']} of {summary['candidates']} papers." in done
+    assert any(t.startswith(f"{cards} knowledge cards") for t in done)
+    assert any(
+        t.startswith(f"Card {cards} of {cards}:") for t in (e["payload"]["text"] for e in lines)
+    )
+    # a line closes before its step completes
+    for i, e in enumerate(events):
+        if e["type"] == "step.completed":
+            step = e["payload"]["step_id"]
+            mine = [x for x in lines if x["payload"]["message_id"].endswith(f".{step}")]
+            assert all(x["payload"].get("done") or events.index(x) < i for x in mine)
+
+
+async def test_a_restarted_stage_starts_its_ui_group_over(tmp_path: Path) -> None:
+    from idea2hypothesis.llm.models import LLMTimeout
+    from tests.fixtures import FixtureLLM
+
+    state = {"failed": False}
+
+    def fail_once(info) -> None:
+        if info.key == "knowledge_extract" and info.index == 1 and not state["failed"]:
+            state["failed"] = True
+            raise LLMTimeout("transient")
+
+    async with harness(tmp_path, llm=FixtureLLM(on_call=fail_once)) as h:
+        _, events = await _completed(h)
+    read_starts = [
+        i for i, e in enumerate(_of(events, "stage.started")) if e["stage_key"] == "read"
+    ]
+    assert len(read_starts) == 2  # the UI drops the failed try's cards and receives them again
+    last_start = max(i for i, e in enumerate(events) if e["type"] == "stage.started"
+                     and e["stage_key"] == "read")  # fmt: skip
+    after = [
+        e["payload"]["card"]["id"] for e in events[last_start:] if e["type"] == "card.extracted"
+    ]
+    assert len(after) == len(set(after)) and after
+
+
+async def test_a_debate_round_shows_concessions_revisions_and_the_judge(tmp_path: Path) -> None:
+    async with harness(tmp_path, llm_settings={"debate_rounds": 1}) as h:
+        run_id, events = await _completed(h)
+        rows = h.service.log._load(run_id)
+        core = {e.seq: e for e in h.service.store.read_events(run_id)}
+    turns = [e["payload"]["turn"] for e in _of(events, "debate.turn")]
+    stances = [t["stance"] for t in turns]
+    # 3 perspectives x 2 hypotheses, each revised once; one answer to each side, one unusable
+    assert stances.count("propose") == 6 and stances.count("refine") == 6
+    assert stances.count("challenge") == 3 and stances.count("concede") == 3
+    by_id = {t["id"]: t for t in turns}
+    assert len(by_id) == len(turns)
+    for t in turns:
+        assert t["about"]
+        if t["stance"] in ("challenge", "concede"):  # answers sit under the hypothesis they answer
+            parent = by_id[t["reply_to"]]
+            assert parent["stance"] == "propose" and parent["about"] == t["about"]
+            assert parent["actor"] != t["actor"]
+    assert {t["about"] for t in turns if t["stance"] == "propose"} == {
+        "T1", "T2", "M1", "M2", "S1", "S2"
+    }  # fmt: skip
+    judge = [t for t in turns if t["id"] == "judge"]
+    assert len(judge) == 1 and judge[0]["actor"] == "pi" and "7/10" in judge[0]["text"]
+    assert judge[0]["about"] == "Verdict"
+    # the rebuttals and the verdict are sent while stage 8 runs, not when it completes
+    sent = [r for r in rows if r["type"] == "debate.turn"]
+    assert all(core[r["_core_seq"]].type == "stage.progress" for r in sent)
+    lines = [e["payload"]["text"] for e in _of(events, "agent.message")]
+    assert any("same model as the perspectives" in t for t in lines)  # no reviewer configured
+    assert any("answered each other in 1 round" in t for t in lines)
+
+
+class _Sources:
+    def exists(self, stage: int, name: str) -> bool:
+        return True
+
+    def read_json(self, stage: int, name: str) -> dict[str, Any]:
+        return {
+            "sources": [{"id": "openalex", "name": "OpenAlex"}, {"id": "arxiv", "name": "arXiv"}]
+        }
+
+
+def test_a_merged_paper_shows_each_source_record_and_the_one_kept() -> None:
+    record = {"url": "", "retrieved_at": ""}
+    merged = {
+        "title": "Sparse attention",
+        "source_records": [
+            {"provider": "openalex", "source_id": "W9", "citations": 40, "has_doi": True, **record},
+            {
+                "provider": "arxiv",
+                "source_id": "2301.1",
+                "citations": 0,
+                "has_doi": False,
+                **record,
+            },
+        ],
+    }
+    single = {"title": "Alone", "source_records": merged["source_records"][:1]}
+    old = {"title": "Before records kept citations", "source_records": [
+        {"provider": "openalex", "source_id": "W1", **record},
+        {"provider": "arxiv", "source_id": "2301.2", **record},
+    ]}  # fmt: skip
+    (event,) = _merges(_Sources(), [merged, single, old])  # type: ignore[arg-type]
+    assert event == {
+        "title": "Sparse attention",
+        "records": [
+            {"source": "OpenAlex", "record_id": "W9", "citations": 40, "has_doi": True},
+            {"source": "arXiv", "record_id": "2301.1", "citations": 0, "has_doi": False},
+        ],
+        "kept": "OpenAlex",
+        "kept_record": "W9",
+    }
+
+
+def test_every_domain_s_perspectives_speak_as_three_different_agents() -> None:
+    import yaml
+
+    from idea2hypothesis.api.platform_events import _ROLE_ACTORS, _idea
+
+    roles_file = Path(__file__).parents[2] / "src/idea2hypothesis/prompts/hypothesis_roles.yaml"
+    for domain, roles in yaml.safe_load(roles_file.read_text())["roles"].items():
+        assert set(roles) <= set(_ROLE_ACTORS), domain
+        actors = [_ROLE_ACTORS[r] for r in roles]
+        assert len(set(actors)) == len(actors), domain  # no two share an agent or a thread
+        assert len({_idea(r, 1) for r in roles}) == len(roles), domain
+
+
+async def test_the_map_draws_each_relation_after_both_its_ends(tmp_path: Path) -> None:
+    async with harness(tmp_path) as h:
+        run_id, events = await _completed(h)
+        graph = h.service.store.artifacts(run_id).read_json(9, "semantic_graph.json")
+    drawn = [e for e in events if e["stage_key"] == "map"]
+    placed: set[str] = set()
+    edges = []
+    for e in drawn:
+        if e["type"] == "map.node":
+            placed.add(e["payload"]["node"]["id"])
+        elif e["type"] == "map.edge":
+            edge = e["payload"]["edge"]
+            assert {edge["from"], edge["to"]} <= placed, edge["id"]
+            edges.append(edge["id"])
+    assert placed == {n["id"] for n in graph["entities"]}
+    assert sorted(edges) == sorted(r["id"] for r in graph["relations"])
+    pieces = [e["payload"]["piece"]["id"] for e in _of(drawn, "canvas.piece")]
+    assert len(pieces) == 9 and pieces[0] == "puzzle"
+    steps = [e["payload"]["step_id"] for e in _of(drawn, "step.completed")]
+    assert steps == ["questions", "foundation", "reasoning", "contribution", "canvas"]
+    summary = _of(drawn, "stage.completed")[0]["payload"]["summary"]
+    assert f"{len(graph['entities'])} entities" in summary

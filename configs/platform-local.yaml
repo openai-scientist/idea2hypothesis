@@ -13,19 +13,31 @@ research:
   min_quality: 0.5
   min_topic_score: 5.0
   novelty_check: true
+  max_shortlist: 20             # read the 20 best-scored papers; 0 keeps all that clear both bars
 
 llm:
-  provider: bedrock
-  model: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  # AWS Bedrock (kept for switching back: uncomment these and comment out the router block below)
+  # provider: bedrock
+  # model: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  # region: ""                   # falls back to AWS_REGION
+  # aws_profile: ""              # falls back to AWS_PROFILE / access keys in the environment
+  # OpenAI-compatible router (kept for switching back: uncomment these and comment out OpenRouter)
+  # provider: openai_compatible
+  # base_url: https://9router.darrenak.id.vn/v1
+  # api_key_env: I2H_LLM_API_KEY
+  # model: scientrag-answer
+  # OpenRouter; the key is read from OPENROUTER_API_KEY in .env
+  provider: openai_compatible
+  base_url: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+  model: nvidia/nemotron-3-ultra-550b-a55b:free
   fallback_models: []
-  region: ""                     # falls back to AWS_REGION
-  aws_profile: ""                # falls back to AWS_PROFILE / access keys in the environment
   timeout_sec: 120
   max_retries: 6                 # Bedrock per-minute quotas throttle bursts; back off
   retry_base_delay: 5.0          # 5, 10, 20, 40, 80 s (+ jitter) before giving up
   temperature: 0.4
   max_tokens: 4096
-  debate_rounds: 0
+  debate_rounds: 1               # each perspective answers the others once, then a judge ranks them
 
 literature:
   sources: [openalex, semantic_scholar, arxiv]
@@ -37,7 +49,7 @@ literature:
   cache: true
 
 prompts:
-  domain: ml
+  domain: ml                     # ml (general default) | biology (metabolic modelling: FBA) | hep
 
 runtime:
   max_retries: 2                 # stage-level retries after the LLM retries are exhausted

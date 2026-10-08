@@ -58,7 +58,7 @@ pipeline with fixtures.
 ## A run
 
 1. `run_pipeline` creates `runs/<run-id>/` with `run.json`, `config.snapshot.json` (no secrets) and
-   `prompts.snapshot.json`, emits `run.started`, then drives stages 1 to 8 in order.
+   `prompts.snapshot.json`, emits `run.started`, then drives stages 1 to 9 in order.
 2. For each stage the runner skips it if the checkpoint says it completed in this attempt and the
    manifest hashes still match; otherwise `execute_stage` checks the inputs (`MISSING_INPUT`),
    runs the stage, retries bounded times on transient provider errors, validates the contract,
@@ -114,7 +114,9 @@ runs/
     prompts.snapshot.json   rendered prompt texts and a content hash
     checkpoint.json         per-stage status, gates, attempt
     events.jsonl            append-only, fsynced, sequence assigned under a per-run lock
-    stage-01/ ... stage-08/ artifacts plus manifest.json
+    stage-01/ ... stage-09/ artifacts plus manifest.json
+    partial/stage-NN/attempt-<n>/  parts kept while a stage runs (scored batches, cards,
+                            perspectives), reused when the stage is paused or retried
     attempts/<n>/stage-NN/  outputs replaced by a rejected gate or an edited upstream artifact
 ```
 
@@ -125,8 +127,11 @@ API process; multiple workers or hosts are not supported.
 ## Events
 
 Core events: `schema_version`, `run_id`, `seq`, `stage`, `type`, `timestamp`, `attempt`, `data`.
-Types: `run.started`, `stage.started`, `stage.completed`, `stage.failed`, `gate.opened`,
-`gate.resolved`, `run.paused`, `run.resumed`, `run.cancelled`, `run.failed`, `run.completed`.
+Types: `run.started`, `stage.started`, `stage.progress`, `stage.completed`, `stage.failed`,
+`gate.opened`, `gate.resolved`, `run.paused`, `run.resumed`, `run.cancelled`, `run.failed`,
+`run.completed`. `stage.progress` (`data.kind`, `stage_run`, `try`) announces a persisted part of
+a running stage (`StageContext.progress`); `kind` `restart` means a transient model error started
+the stage again and the parts announced before it are void.
 They are persisted before any observer is notified and describe only what happened. The API
 translates them, together with the real artifacts, into the Platform event envelope; the UI
 groups stages as scope (1, 2), search (3, 4), screen (5), read (6), synthesize (7) and
@@ -138,6 +143,9 @@ hypothesize (8).
   configured `fallback_models`, classifies non-retryable errors, strips reasoning tags and
   extracts JSON objects robustly from fenced or chatty replies. Missing credentials raise
   `LLMConfigError` when services are built, not in the middle of a run.
+* The OpenAI-compatible client streams completions: `llm.timeout_sec` is the longest silence
+  between two chunks, so a long answer that keeps arriving is not cut off, and a whole call is
+  capped at 15 minutes. A router that ignores `stream` and returns one JSON body still works.
 * Stages ask for one JSON object per prompt. An invalid answer is sent back once per allowed
   retry with the list of errors; if it is still invalid the stage fails (`LLM_OUTPUT_INVALID`).
 * Screening pre-filters candidates by keyword overlap (listed in `review.json` as `prefiltered`

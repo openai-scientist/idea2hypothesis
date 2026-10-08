@@ -93,7 +93,7 @@ async def run(ctx: StageContext) -> list[str]:
         ctx,
         prompt,
         label="synthesis",
-        validate=lambda d: check_synthesis(d, known_sq, included, source_text),
+        validate=lambda d: check_synthesis(d, known_sq, included, source_text, every_card=True),
     )
     synthesis = {"schema_version": 1, "topic": ctx.topic, **data, "generated_at": utc_now()}
     ctx.artifacts.write_json(STAGE, "synthesis.json", synthesis)

@@ -15,6 +15,16 @@ from idea2hypothesis.literature.models import (
 )
 
 
+def _stamped(paper: Paper) -> Paper:
+    """A provider's own record carries what it said, so a merge can show each source's version."""
+    if len(paper.source_records) != 1 or paper.source_records[0].citations is not None:
+        return paper
+    record = dataclasses.replace(
+        paper.source_records[0], citations=paper.citation_count, has_doi=bool(paper.doi)
+    )
+    return dataclasses.replace(paper, source_records=(record,))
+
+
 def _merge(primary: Paper, other: Paper) -> Paper:
     """Merge two records of the same work: keep the richer one, fill gaps, union provenance."""
     if (other.citation_count, len(other.abstract)) > (
@@ -61,7 +71,7 @@ def deduplicate(papers: Iterable[Paper]) -> tuple[list[Paper], int]:
             normalise_title(paper.title),
         )
 
-    for paper in papers:
+    for paper in map(_stamped, papers):
         doi, arxiv, title = keys(paper)
         index = None
         for table, key in ((by_doi, doi), (by_arxiv, arxiv), (by_title, title)):

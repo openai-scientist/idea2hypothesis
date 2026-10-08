@@ -79,7 +79,7 @@ async def test_approving_the_gate_continues_to_completion(tmp_path: Path) -> Non
     result = await answer_gate(first.run_id, first.gate["gate_id"], GateAnswer("approve"), services)
 
     assert result.status is RunStatus.COMPLETED
-    assert result.completed_stages == (1, 2, 3, 4, 5, 6, 7, 8)
+    assert result.completed_stages == (1, 2, 3, 4, 5, 6, 7, 8, 9)
     types = _types(services, first.run_id)
     assert types.index("gate.resolved") < types.index("run.completed")
 
@@ -255,7 +255,7 @@ async def test_resume_after_completion_is_a_no_op(tmp_path: Path) -> None:
 
     again = await resume_pipeline(done.run_id, services)
     assert again.status is RunStatus.COMPLETED
-    assert again.completed_stages == (1, 2, 3, 4, 5, 6, 7, 8)
+    assert again.completed_stages == (1, 2, 3, 4, 5, 6, 7, 8, 9)
     assert len(llm.calls) == calls
     assert len(services.store.read_events(done.run_id)) == events
 

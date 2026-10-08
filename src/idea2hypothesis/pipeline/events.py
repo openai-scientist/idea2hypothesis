@@ -14,6 +14,9 @@ SCHEMA_VERSION = 1
 RUN_STARTED = "run.started"
 STAGE_STARTED = "stage.started"
 STAGE_COMPLETED = "stage.completed"
+#: Part of a stage's result is ready (a scored batch, a card, a perspective). ``data["kind"]``
+#: names what; the data points to records the stage has already persisted.
+STAGE_PROGRESS = "stage.progress"
 STAGE_FAILED = "stage.failed"
 GATE_OPENED = "gate.opened"
 GATE_RESOLVED = "gate.resolved"
@@ -27,6 +30,7 @@ EVENT_TYPES = (
     RUN_STARTED,
     STAGE_STARTED,
     STAGE_COMPLETED,
+    STAGE_PROGRESS,
     STAGE_FAILED,
     GATE_OPENED,
     GATE_RESOLVED,

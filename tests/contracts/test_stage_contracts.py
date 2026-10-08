@@ -59,10 +59,11 @@ def test_json_artifacts_carry_a_schema_version(art: ArtifactStore) -> None:
         (1, "goal.json"), (2, "problem_tree.json"), (2, "topic_evaluation.json"),
         (3, "queries.json"), (3, "sources.json"), (4, "search_meta.json"),
         (5, "review.json"), (5, "screen_meta.json"), (6, "knowledge_meta.json"),
-        (7, "synthesis.json"), (8, "hypotheses.json"),
+        (7, "synthesis.json"), (8, "hypotheses.json"), (9, "argument_map.json"),
+        (9, "semantic_graph.json"), (9, "research_canvas.json"),
     ]:  # fmt: skip
         assert art.read_json(stage, name)["schema_version"] == 1, name
-    for stage in range(1, 9):
+    for stage in range(1, 10):
         assert art.read_manifest(stage)["schema_version"] == 1
 
 
@@ -249,3 +250,46 @@ def test_missing_output_is_reported_by_name(art: ArtifactStore) -> None:
 def test_missing_inputs_names_the_upstream_file(art: ArtifactStore) -> None:
     art.path(4, "candidates.jsonl").unlink()
     assert missing_inputs(Stage.LITERATURE_SCREEN, art) == ["stage-04/candidates.jsonl"]
+
+
+def test_stage9_judges_every_clustered_card_and_grounds_every_hypothesis(
+    art: ArtifactStore,
+) -> None:
+    edit_json(art, 9, "argument_map.json", lambda d: d["evidence_links"].pop())
+    assert any("not judged" in e for e in validate_stage(Stage.ARGUMENT_MAP, art).errors)
+    edit_json(art, 9, "argument_map.json", lambda d: d.update(rationales=d["rationales"][1:]))
+    errors = validate_stage(Stage.ARGUMENT_MAP, art).errors
+    assert any("no claim as rationale" in e for e in errors)
+
+
+def test_stage9_graph_keeps_the_relation_direction(art: ArtifactStore) -> None:
+    def flip(d: dict) -> None:
+        r = next(r for r in d["relations"] if r["relation"] == "addresses")
+        r["from"], r["to"] = r["to"], r["from"]
+
+    edit_json(art, 9, "semantic_graph.json", flip)
+    errors = validate_stage(Stage.ARGUMENT_MAP, art).errors
+    assert any("must read from hypothesis to gap" in e for e in errors)
+
+
+def test_stage9_graph_says_which_relations_are_judged(art: ArtifactStore) -> None:
+    graph = art.read_json(9, "semantic_graph.json")
+    judged = art.read_json(9, "argument_map.json")
+    status = {r["relation"]: r["status"] for r in graph["relations"]}
+    assert status["supports"] == status["provides_rationale_for"] == "unreviewed"
+    assert status["decomposes_into"] == status["addresses"] == status["motivates"] == "stated"
+    unrelated = [x for x in judged["evidence_links"] if x["relation"] == "unrelated"]
+    linked = [r for r in graph["relations"] if r["relation"] in ("supports", "contradicts")]
+    assert unrelated and len(linked) == len(judged["evidence_links"]) - len(unrelated)
+    hypotheses = art.read_json(8, "hypotheses.json")["hypotheses"]
+    assert {e["id"] for e in graph["entities"] if e["type"] == "hypothesis"} == {
+        f"H:{h['id']}" for h in hypotheses
+    }
+
+
+def test_stage9_canvas_holds_nine_pieces_and_findings_wait(art: ArtifactStore) -> None:
+    pieces = art.read_json(9, "research_canvas.json")["pieces"]
+    assert len(pieces) == 9 and pieces[0]["id"] == "puzzle"
+    assert next(p for p in pieces if p["id"] == "findings")["status"] == "pending"
+    edit_json(art, 9, "research_canvas.json", lambda d: d["pieces"].pop())
+    assert any("nine pieces" in e for e in validate_stage(Stage.ARGUMENT_MAP, art).errors)

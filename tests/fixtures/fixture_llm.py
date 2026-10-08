@@ -26,9 +26,10 @@ _MARKERS: list[tuple[str, str]] = [
     ("Extract a structured knowledge card", "knowledge_extract"),
     ("Produce a synthesis (topic clusters", "synthesis"),
     ("Write the final set of 2-4 hypotheses", "hypothesis_gen"),
-    ("Write your updated position", "debate_rebuttal"),
+    ("Then write your updated position", "debate_rebuttal"),
     ("Score each perspective 1-10", "debate_judge"),
     ("Allowed evidence references", "perspective"),
+    ("Judge how the evidence bears on each claim", "argument_map"),
 ]
 
 
@@ -191,7 +192,19 @@ class FixtureLLM:
         }
 
     def _default_topic_evaluation(self, info: PromptInfo) -> dict[str, Any]:
-        return {"novelty": 8, "specificity": 7, "feasibility": 7, "overall": 7.3, "suggestion": ""}
+        reasons = {
+            "novelty": "Exam timing is rarely studied with sleep.",
+            "specificity": "Sleep hours and exam scores are both named.",
+            "feasibility": "A student survey suffices.",
+        }
+        return {
+            "novelty": 8,
+            "specificity": 7,
+            "feasibility": 7,
+            "overall": 7.3,
+            "reasons": reasons,
+            "suggestion": "Name the exam type to sharpen the outcome.",
+        }
 
     def _default_search_strategy(self, info: PromptInfo) -> dict[str, Any]:
         sq = info.ids(r"\"id\": \"(SQ\d+)\"")
@@ -243,8 +256,10 @@ class FixtureLLM:
     def _default_synthesis(self, info: PromptInfo) -> dict[str, Any]:
         cards = info.section_json("Cards:\n")
         card_ids = [c["card_id"] for c in cards]
+        aside = card_ids[-1:] if len(card_ids) >= 3 else []  # one card fits no school of thought
+        sorted_ids = card_ids[: len(card_ids) - len(aside)]
         sq = info.ids(r"\"id\": \"(SQ\d+)\"")
-        half = max(1, len(card_ids) // 2)
+        half = max(1, len(sorted_ids) // 2)
         return {
             "overview": "Evidence converges on a modest sleep effect with measurement gaps.",
             "clusters": [
@@ -252,13 +267,13 @@ class FixtureLLM:
                     "id": "C1",
                     "title": "Duration effects",
                     "claim": "More sleep helps",
-                    "card_ids": card_ids[:half],
+                    "card_ids": sorted_ids[:half],
                 },
                 {
                     "id": "C2",
                     "title": "Timing effects",
                     "claim": "Regularity matters",
-                    "card_ids": card_ids[half:] or card_ids[:1],
+                    "card_ids": sorted_ids[half:] or sorted_ids[:1],
                 },
             ],  # fmt: skip
             "tensions": [{"between": ["C1", "C2"], "text": "duration versus regularity"}],
@@ -281,7 +296,9 @@ class FixtureLLM:
                 },
             ],  # fmt: skip
             "prioritized_opportunities": [{"gap_id": "G1", "direction": "within-subject cohort"}],
-            "set_aside": [],
+            "set_aside": [{"id": "A1", "card_ids": aside, "reason": "studies another task"}]
+            if aside
+            else [],
         }
 
     def _hypotheses(self, info: PromptInfo, tag: str, count: int) -> list[dict[str, Any]]:
@@ -327,13 +344,45 @@ class FixtureLLM:
         return {"hypotheses": self._hypotheses(info, f"role{info.index}", 2)}
 
     def _default_debate_rebuttal(self, info: PromptInfo) -> dict[str, Any]:
-        return {"hypotheses": self._hypotheses(info, f"rebut{info.index}", 2), "concessions": ["x"]}
+        others = re.findall(r"^### (\w+)$", info.user, re.MULTILINE)
+        responses = [
+            {"to": others[0], "hypothesis": 1, "stance": "challenge", "text": "confounded by age"},
+            {"to": others[-1], "hypothesis": 2, "stance": "concede", "text": "well grounded"},
+            {"to": "nobody", "hypothesis": 1, "stance": "challenge", "text": "unusable"},
+        ]
+        hypotheses = self._hypotheses(info, f"rebut{info.index}", 2)
+        return {"hypotheses": hypotheses, "responses": responses}
 
     def _default_debate_judge(self, info: PromptInfo) -> dict[str, Any]:
         return {"rankings": [{"role": "any", "score": 7, "reason": "solid"}]}
 
     def _default_hypothesis_gen(self, info: PromptInfo) -> dict[str, Any]:
         return {"hypotheses": self._hypotheses(info, "final", 3), "disagreements": ["effect size"]}
+
+    def _default_argument_map(self, info: PromptInfo) -> dict[str, Any]:
+        claims = info.section_json("Claims and their cards:\n", "Hypotheses:")
+        hypotheses = info.section_json("Hypotheses:\n")
+        relations = ["supports", "contradicts", "unrelated"]
+        links = [
+            {
+                "card_id": card["card_id"],
+                "claim_id": claim["id"],
+                "relation": relations[i % len(relations)] if i else "supports",
+                "rationale": f"The card's findings bear on {claim['id']}.",
+            }
+            for claim in claims
+            for i, card in enumerate(claim["cards"])
+        ]
+        rationales = [
+            {
+                "claim_id": claims[i % len(claims)]["id"],
+                "hypothesis_id": h["id"],
+                "polarity": "challenges" if i == len(hypotheses) - 1 else "supports",
+                "rationale": f"{claims[i % len(claims)]['id']} bears on {h['id']}.",
+            }
+            for i, h in enumerate(hypotheses)
+        ]
+        return {"evidence_links": links, "rationales": rationales}
 
     def _default_unknown(self, info: PromptInfo) -> Any:
         raise AssertionError(f"FixtureLLM got an unrecognised prompt: {info.user[:200]!r}")

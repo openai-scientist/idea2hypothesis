@@ -297,8 +297,8 @@ async def test_cost_is_null_unless_priced(tmp_path: Path) -> None:
         run_id = (await h2.start("p-1", review_mode="auto")).json()["popper_run_id"]
         await h2.settle()
         state = await h2.state(run_id)
-        assert state["cost_usd"] == "0.1900"  # 19 priced calls
-        assert (await h2.events(run_id))[-1]["payload"]["cost_usd"] == "0.1900"
+        assert state["cost_usd"] == "0.2000"  # 20 priced calls
+        assert (await h2.events(run_id))[-1]["payload"]["cost_usd"] == "0.2000"
 
 
 async def test_budget_exceeded_pauses_a_priced_run(tmp_path: Path) -> None:
@@ -329,7 +329,8 @@ async def test_invalid_requests_are_rejected(tmp_path: Path) -> None:
 
 
 async def test_delivery_failure_does_not_affect_the_run(tmp_path: Path) -> None:
-    platform = FakePlatform(script=[500] * 50)
+    # Every new event restarts a failed delivery, so the platform stays down for the whole run.
+    platform = FakePlatform(script=[500] * 1000)
     async with harness(tmp_path, platform=platform) as h:
         run_id = (await h.start("p-1", review_mode="auto")).json()["popper_run_id"]
         await h.settle()

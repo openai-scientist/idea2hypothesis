@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 class Stage(IntEnum):
-    """The eight idea to hypothesis stages."""
+    """The idea to hypothesis stages: eight that build the hypotheses, then the argument map."""
 
     TOPIC_INIT = 1
     PROBLEM_DECOMPOSE = 2
@@ -33,6 +33,7 @@ class Stage(IntEnum):
     KNOWLEDGE_EXTRACT = 6
     SYNTHESIS = 7
     HYPOTHESIS_GEN = 8
+    ARGUMENT_MAP = 9
 
 
 STAGE_SEQUENCE: tuple[Stage, ...] = tuple(Stage)
@@ -123,6 +124,7 @@ class RunResult:
 
 
 Sleep = Callable[[float], Awaitable[None]]
+Report = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 @dataclass
@@ -163,8 +165,16 @@ class StageContext:
     checkpoint: Callable[[], Awaitable[None]] | None = None
     hardware: Callable[[], HardwareProfile] | None = None
     sleep: Sleep = asyncio.sleep
+    report: Report | None = None
+    #: Which execution of the stage this is (0 first; a transient LLM error starts another).
+    try_index: int = 0
 
     async def safe_point(self) -> None:
         """Raise :class:`RunInterrupted` if a pause or cancel was requested."""
         if self.checkpoint is not None:
             await self.checkpoint()
+
+    async def progress(self, kind: str, **data: Any) -> None:
+        """Announce part of the result as soon as it is persisted (a ``stage.progress`` event)."""
+        if self.report is not None:
+            await self.report(kind, {"try": self.try_index, **data})

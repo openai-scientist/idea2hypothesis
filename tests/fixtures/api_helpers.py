@@ -127,9 +127,15 @@ async def harness(
     literature: FixtureLiterature | None = None,
     platform: FakePlatform | None = None,
     send_key: bool = True,
+    llm_settings: dict[str, Any] | None = None,
     **sections: dict[str, Any],
 ) -> AsyncIterator[Harness]:
-    """App + client with the lifespan running; ``tmp_path`` identifies the run storage."""
+    """App + client with the lifespan running; ``tmp_path`` identifies the run storage.
+
+    ``llm_settings`` is the ``llm`` configuration section (``llm`` is the fixture model).
+    """
+    if llm_settings:
+        sections["llm"] = llm_settings
     config = api_config(tmp_path, **sections)
     services = make_services(tmp_path, llm=llm, literature=literature, config=config)
     fake = platform or FakePlatform()

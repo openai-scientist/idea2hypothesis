@@ -10,6 +10,7 @@ research:
   min_quality: 0.5
   min_topic_score: 5.0           # stage 2 stops below this overall topic score (0-10)
   novelty_check: true            # write novelty_report.json in stage 8
+  max_shortlist: 20              # papers kept for reading, best scores first; 0 = no cap
 
 llm:
   provider: openai_compatible    # or: bedrock

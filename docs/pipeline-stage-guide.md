@@ -1,4 +1,4 @@
-# Pipeline stage guide (stages 1 to 8)
+# Pipeline stage guide (stages 1 to 9)
 
 What each stage does, the principle behind it, where its input comes from and what it leaves on
 disk. Exact pass conditions are in [stage-contracts.md](stage-contracts.md); module structure is in
@@ -107,6 +107,13 @@ Module `stages/literature_screen.py`. Input: `stage-04/candidates.jsonl`, goal a
   quality (0 to 1) with a reason: domain match, method relevance, cross-domain rejection, recency
   preference, quality floor. Papers are kept at `research.min_relevance` and
   `research.min_quality` (defaults 0.7 and 0.5).
+* **Anchored scores.** The prompt defines each score band (for relevance, 0.90 means the paper
+  studies the question itself and 0.30 means it shares only a term) and asks for two decimals, so
+  scores spread across a band instead of piling up on round values. Scores describe the paper and
+  the decision applies the rules: a false friend can score high on relevance and still be rejected.
+* **Capped shortlist.** At most `research.max_shortlist` papers are kept (default 20; 0 keeps all),
+  best relevance first, then quality. Stage 6 reads every kept paper, so the cap bounds its time
+  and cost; papers below the cut are `below_cutoff` with their scores and a reason.
 * **False friends.** Papers that share a keyword but belong to another field are rejected, and
   `false_friend` records the shared word. For the topic "sleep and exam performance", a paper on
   sleep scheduling in sensor networks is rejected, not kept.
@@ -166,11 +173,31 @@ constraints and, with memory enabled, past anti-patterns.
 * If no perspective yields usable hypotheses the stage fails (`NO_PERSPECTIVES`); defaults are
   never substituted.
 
-Output: `hypotheses.json`, `hypotheses.md`, `perspectives/`, `novelty_report.json`. The run is then
+Output: `hypotheses.json`, `hypotheses.md`, `perspectives/`, `novelty_report.json`.
+
+## Stage 9: ARGUMENT_MAP
+
+Module `stages/argument_map.py`. Input: `goal.json`, `problem_tree.json`, cards, the stage 5
+shortlist (for citations), `synthesis.json` and `hypotheses.json`.
+
+* **One model call** (`argument_map` prompt) judges what no earlier stage records: whether each
+  clustered card `supports`, `contradicts` or is `unrelated` to its own cluster's claim, and which
+  claims ground (`supports`) or `challenge` each hypothesis. Every clustered card is judged once and
+  every hypothesis needs at least one claim, or the output is repaired and then rejected.
+* **Semantic graph** (Scientific Research Canvas v1.0): 7 entity types (question, evidence, claim,
+  gap, hypothesis, assumption, contribution) and 11 directed relations, each with a `rationale`, a
+  `provenance` and a `status`: `stated` when a record of stages 1 to 8 says it, `unreviewed` when it
+  is the stage 9 judgement. Cards judged `unrelated` are left off with a warning. Everything else is
+  copied from the records; contributions are expected only, since nothing has been tested.
+* **Research canvas**: the nine pieces of the AMJ Management Research Canvas, each line with the
+  record ids it comes from. `findings` stays `pending` (the falsification criteria wait for an
+  experiment); a piece the run has nothing for is `pending` too, never padded.
+
+Output: `argument_map.json`, `semantic_graph.json`, `research_canvas.json`. The run is then
 `completed`.
 
-## After stage 8
+## After stage 9
 
 There is no further stage. A downstream consumer (for example an experiment designer) reads
 `hypotheses.json` and follows `evidence_refs` and `gap_id` back through `synthesis.json`, cards and
-`candidates.jsonl` to the papers.
+`candidates.jsonl` to the papers, or reads the same links in `semantic_graph.json`.

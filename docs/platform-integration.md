@@ -102,8 +102,8 @@ answers `503 LLM_NOT_CONFIGURED` and creates nothing.
 | `copilot` | `screen` gate after stage 5 |
 | `full` | `scope` gate after stage 2, `screen` gate after stage 5 |
 
-`reject` at the screen gate reruns stages 3-8 (attempt + 1, new gate id `gate-s05-a2`);
-`reject` at the scope gate reruns stages 1-8. Approving never bypasses validation or an empty
+`reject` at the screen gate reruns stages 3-9 (attempt + 1, new gate id `gate-s05-a2`);
+`reject` at the scope gate reruns stages 1-9. Approving never bypasses validation or an empty
 shortlist.
 
 ## Event stream
@@ -114,7 +114,30 @@ real core events and the artifacts of the stage that produced them (`api/platfor
 
 UI groups (`stage_key`): `scope` = stages 1-2, `search` = 3-4, `screen` = 5, `read` = 6,
 `synthesize` = 7, `r1-hypothesize` = 8 (the key the run studio reads; `hypothesize` is the UI
-`stage` value in `run.plan`/`stage.started`).
+`stage` value in `run.plan`/`stage.started`), `map` = 9.
+
+### Parts of a stage are sent as soon as they exist
+
+Long stages announce each part of their result once it is persisted (core `stage.progress`), and
+the parts are translated and delivered at once instead of when the stage completes:
+
+| Stage | Sent while it runs |
+| --- | --- |
+| 4 collect | `literature.request` + `literature.batch` after each query (planned queries only) |
+| 5 screen | `screen.criteria` and the `prefiltered` rejections first, then per scored batch its `screen.scored` points and `screen.rejected` papers; `screen.kept` follows the final, capped shortlist |
+| 6 read | one `card.extracted` per card |
+| 8 hypothesize | `debate.turn` threads, one per hypothesis of each perspective; `hypothesis.drafted` and `rule.checked` before the novelty check |
+
+When the stage completes only what was not sent yet follows, so no part is sent twice. If a
+transient model error restarts stage 5, 6, 7 or 8, its `stage.started` is sent again: the run
+studio starts that group over and the parts are sent again. Cards, scored batches and
+perspectives are kept per attempt under `runs/<id>/partial/`, so a paused or restarted stage
+reuses them instead of asking the model again.
+
+`agent.message` (`message_id`, `text`, `done`) says what the current step is doing and, when it
+ends, what it produced. A line with the same `message_id` replaces the previous one; `done: true`
+closes it before its `step.completed`. Every number and name in it comes from the run's records
+(queries, scored batches, cards, artifacts); nothing is invented.
 
 ### Emitted types and their sources
 
@@ -126,27 +149,31 @@ UI groups (`stage_key`): `scope` = stages 1-2, `search` = 3-4, `screen` = 5, `re
 | `scope.goal` | `goal.json` (fields title/problem/objective/scope/success) |
 | `scope.approved` | the scope gate approval (`full` mode only) |
 | `problem.subquestion`, `problem.risk`, `topic.evaluated` | `problem_tree.json`, `topic_evaluation.json` (the rating is also sent when it stops the run) |
-| `search.strategy`, `search.query`, `search.sources` | `search_plan.yaml`, `queries.json`, `sources.json` |
-| `literature.request`, `literature.batch`, `literature.collected` | `search_meta.json` per-query hits and totals (expansion queries are not listed) |
-| `screen.criteria`, `screen.scored`, `screen.rejected`, `screen.kept` | `review.json`, `shortlist.jsonl` (one point per scored paper, every rejection with its reason) |
+| `search.strategy`, `search.query`, `search.sources` | `search_plan.yaml`, `queries.json`, `sources.json`; `delay_ms` is `literature.inter_query_delay_sec` |
+| `literature.request`, `literature.batch`, `literature.collected` | `search_meta.json` per-query hits and totals; expansion queries have no cell, so `literature.collected.expansion` gives their count and hits |
+| `literature.merged` | `candidates.jsonl`: one per paper found as several source records, each record with its own `citations` and `has_doi`; `kept` / `kept_record` name the record whose metadata was kept (most citations, then the longer abstract) |
+| `screen.criteria`, `screen.scored`, `screen.rejected`, `screen.kept` | `review.json`, `shortlist.jsonl` (one point per scored paper, every rejection with its reason; `decision` is `rejected`, `below_cutoff`, `unscored` or `prefiltered`; `screen.criteria.candidates` is the number of candidates) |
 | `card.extracted` | `cards/*.json` (`id` is the card id used by clusters and gaps; unknown fields are empty strings and listed in `unknown_fields`) |
 | `synthesis.cluster`, `.tension`, `.gap`, `.overview`, `.ranked` | `synthesis.json` |
-| `debate.turn` | `perspectives/*.json` (one turn per perspective output / rebuttal round) |
+| `synthesis.set_aside` | `synthesis.json` `set_aside`: cards in no cluster, as `{aside: {id, card_ids, reason}}`; with the clusters they account for every card |
+| `debate.turn` | `perspectives/*.json`: each hypothesis of a perspective is a thread (`about`: `T1`, `M2`, `S1` for the Theorist, Methodologist and Skeptic) opened by a `propose` turn. With `llm.debate_rounds`, each rebuttal's `responses` become `challenge` and `concede` turns whose `reply_to` is the proposal they answer, its `revised` hypotheses `refine` turns and its `added` ones new `propose` turns. Engine perspective names in the text (innovator, pragmatist, contrarian) are replaced by the agents' names. The judge's ranking from `debate_record.json` is a `test` turn by `pi` (id `judge`, `about` `Verdict`) |
 | `hypothesis.drafted`, `hypothesis.selected` | `hypotheses.json` (`falsify.zone` derived from the validated `prediction`) |
 | `hypothesis.checked` | `novelty_report.json` (`novelty` only; heuristic) |
 | `rule.checked` | rule 5, only after `hypotheses.json` passed the falsification contract |
+| `map.node`, `map.edge` | `semantic_graph.json`: `{node}` is an entity, `{edge}` a relation; steps `questions`, `foundation`, `reasoning` and `contribution` each send their entities, then the relations they complete, so an edge never arrives before both its ends |
+| `canvas.piece` | `research_canvas.json`, one `{piece}` per canvas piece (step `canvas`) |
 | `gate.opened`, `gate.resolved` | core gate events; `gate.opened` carries `gate_id`, `kind`, `droppable`, `options`, `summary`, `stop_index/stop_total` and the shortlist / scope data |
 | `run.status` | `awaiting_review` (before `gate.opened`), `running` (resume), `paused` (with `reason`), `failed` (with `reason` incl. error code, also for cancel) |
 | `run.completed` | final usage; `cost_usd` only when priced |
+| `agent.message` | progress and artifacts of the current step (see above) |
 
 ### Dropped or changed relative to the previous engine
 
 | Previous type | Now | Reason |
 | --- | --- | --- |
-| `agent.message` | dropped | the old text was generated narration; the engine has no real narration to relay |
+| `agent.message` | built from the run's records | the old text was generated narration; the new lines only report what a step is doing and what it produced |
 | `skills.loaded`, `scope.estimate`, `scope.adjusted` | dropped | hardcoded / no source |
 | `estimate.checked`, `rule.checked` (rule 6, rule 5 always `pass`) | dropped / only real rule 5 | were unconditional |
-| `literature.merged` | dropped | per-source citation counts are not retained |
 | `idea.set_aside` | dropped | no source in stage 8 output |
 | `scope.approved` | only after a human scope approval | was emitted automatically |
 | `hypothesis.checked.feasibility` | omitted | the engine does not assess feasibility; the run studio shows the novelty card only when both parts exist (a studio change is needed to show novelty alone) |

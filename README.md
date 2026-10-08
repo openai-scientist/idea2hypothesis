@@ -1,8 +1,8 @@
 # idea2hypothesis
 
-idea2hypothesis turns a research idea into evidence-linked, falsifiable hypotheses. It runs eight
+idea2hypothesis turns a research idea into evidence-linked, falsifiable hypotheses. It runs nine
 stages: scope the topic, search real literature, screen it, extract evidence cards, synthesise
-research gaps and generate hypotheses. Every output is written to disk as JSON (plus a Markdown
+research gaps, generate hypotheses and map the argument as a semantic graph and a research canvas. Every output is written to disk as JSON (plus a Markdown
 rendering for people) and every claim points back to a stored record.
 
 The project was extracted from the stage 1 to 8 part of an earlier autonomous research pipeline;
@@ -32,6 +32,7 @@ the entry points.
 | 6 | `KNOWLEDGE_EXTRACT` | `cards/*.json`, `cards/*.md`, `knowledge_meta.json` |
 | 7 | `SYNTHESIS` | `synthesis.json`, `synthesis.md` |
 | 8 | `HYPOTHESIS_GEN` | `hypotheses.json`, `hypotheses.md`, `perspectives/`, `novelty_report.json` |
+| 9 | `ARGUMENT_MAP` | `argument_map.json`, `semantic_graph.json`, `research_canvas.json` |
 
 Contracts and pass conditions are in [docs/stage-contracts.md](docs/stage-contracts.md).
 Review modes: `auto` and `light` have no manual gate (`light` adds advisory quality notes),

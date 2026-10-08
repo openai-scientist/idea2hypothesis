@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from idea2hypothesis.literature.citations import papers_to_bibtex
@@ -18,7 +19,8 @@ def expand_queries(queries: list[str], topic: str) -> list[str]:
     """Broader variants of the planned queries (shorter topic windows, survey/benchmark forms)."""
     expanded: list[str] = []
     seen = {q.lower().strip() for q in queries}
-    words = topic.split()
+    # Keep words only: punctuation such as "?" makes some sources reject the query.
+    words = [w for w in (re.sub(r"[^\w-]", "", word) for word in topic.split()) if w]
 
     def add(candidate: str) -> None:
         key = candidate.lower().strip()
@@ -56,6 +58,7 @@ async def run(ctx: StageContext) -> list[str]:
     papers: list[Paper] = []
     per_source: dict[str, SourceStats] = {}
     per_query: dict[str, dict[str, int]] = {}
+    await ctx.progress("queries", planned=len(planned), expanded=len(extra))
     for index, query in enumerate(all_queries):
         await ctx.safe_point()
         if index > 0:
@@ -66,6 +69,14 @@ async def run(ctx: StageContext) -> list[str]:
         papers.extend(report.papers)
         _merge_stats(per_source, report)
         per_query.update(report.per_query)
+        await ctx.progress(
+            "query",
+            text=query,
+            index=index + 1,
+            total=len(all_queries),
+            hits=dict(report.per_query.get(query, {})),
+            raw=raw,
+        )
 
     unique, _ = deduplicate(papers)
     unique.sort(key=lambda p: (p.citation_count, p.year), reverse=True)

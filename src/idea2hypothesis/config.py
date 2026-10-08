@@ -52,6 +52,8 @@ class ResearchConfig:
     min_quality: float = 0.5
     min_topic_score: float = 5.0
     novelty_check: bool = True
+    #: Most papers kept for reading (best scores first); 0 keeps every paper that clears both bars.
+    max_shortlist: int = 20
 
 
 @dataclass(frozen=True)
@@ -238,6 +240,7 @@ def _parse_research(data: Any) -> ResearchConfig:
         min_quality=r.float("min_quality", d.min_quality, minimum=0.0),
         min_topic_score=r.float("min_topic_score", d.min_topic_score, minimum=0.0),
         novelty_check=r.bool("novelty_check", d.novelty_check),
+        max_shortlist=r.int("max_shortlist", d.max_shortlist, minimum=0),
     )
     r.finish()
     return cfg
