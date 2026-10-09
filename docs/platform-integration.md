@@ -108,9 +108,11 @@ A gate approved before the rollback point is not asked again. Approving never by
 validation or an empty shortlist.
 
 The `hypotheses` gate (`gate-s08-a<attempt>`) carries `droppable` (hypothesis ids), `keepable`
-(held-back candidates by thread id, such as `T2`), `hypotheses`, `held_back` and `stage_key` (the
-UI group the answer belongs to). Its answer is `approve`, `drop` with `dropped` and/or `kept`, or
-`reject` with a note; `kept` ids that are not held back answer 422.
+(candidates the set leaves out, held back or not used, by thread id, such as `T2`), `hypotheses`,
+`held_back`, `not_used` and `stage_key` (the UI group the answer belongs to). Its answer is
+`approve`, `drop` with `dropped` and/or `kept`, or `reject` with a note; `kept` ids that were not
+set aside answer 422. Each left-out candidate is also sent as `idea.set_aside` with its reason and `kind` (`held_back` or `not_used`), and
+a merged hypothesis carries `merge_note` (candidate ids written as their threads).
 
 ## Event stream
 
@@ -163,7 +165,7 @@ closes it before its `step.completed`. Every number and name in it comes from th
 | `synthesis.cluster`, `.tension`, `.gap`, `.overview`, `.ranked` | `synthesis.json`; from synthesis schema 2 a tension also has `id` (`X1`) and `sides` (`claim`, `card_ids`) |
 | `synthesis.set_aside` | `synthesis.json` `set_aside`: cards in no cluster, as `{aside: {id, card_ids, reason}}`; with the clusters they account for every card |
 | `debate.turn` | `perspectives/*.json`: each hypothesis of a perspective is a thread (`about`: `T1`, `M2`, `S1` for the Theorist, Methodologist and Skeptic) opened by a `propose` turn. With `llm.debate_rounds`, a round's critiques (`phase: "critique"`) become `challenge` and `concede` turns whose `reply_to` is the proposal they answer; then each author's answers (`phase: "answer"`) follow: a revision is a `refine` turn with the new statement, `note` (the author's reason) and `answers` (ids of the challenges it answers, the first also in `reply_to`); a defence is a `defend` turn and a withdrawal a `concede` turn by the author, each replying to the challenge it answers; `added` hypotheses are new `propose` turns. A turn's `answers` are the only link from an answer to a challenge; a `refine` without them was not written in reply to a challenge. Every challenge carries `severity` (`fatal` or `caveat`) and, when fatal, `flaw`, `field` and for `already_established` `card_id`. Each critic's review (`phase: "review"`) follows: a `concede` turn when the answer resolves its objection, a `challenge` turn at the severity that still stands when it does not, both with `answers` naming the challenge and `reply_to` the answer they review; then its critique of the hypotheses added that round. Engine perspective names in the text (innovator, pragmatist, contrarian) are replaced by the agents' names. The judge's ranking from `debate_record.json` is a `test` turn by `pi` (id `judge`, `about` `Verdict`) |
-| `hypothesis.drafted`, `hypothesis.selected` | `hypotheses.json` (`falsify.zone` derived from the validated `prediction`; `tension_ids` lists the synthesis tensions the hypothesis settles; `from` the debate threads it is built from; `contested` and `caveats` the objections that still stand, each with `by` the agent, `about` the thread, `severity`, `flaw`, `text`; `kept_by_reviewer` when kept at the gate). A candidate kept at the hypotheses gate is sent as `hypothesis.drafted` and `hypothesis.selected` after `gate.resolved` |
+| `hypothesis.drafted`, `hypothesis.selected` | `hypotheses.json` (`falsify.zone` derived from the validated `prediction`; for `≈ 0` the zone is `[null, null]` and `falsify.within` gives the band `[-margin, margin]` the result must land in; `merge_note` on a hypothesis merged from several threads; `tension_ids` lists the synthesis tensions the hypothesis settles; `from` the debate threads it is built from; `contested` and `caveats` the objections that still stand, each with `by` the agent, `about` the thread, `severity`, `flaw`, `text`; `kept_by_reviewer` when kept at the gate). A candidate kept at the hypotheses gate is sent as `hypothesis.drafted` and `hypothesis.selected` after `gate.resolved` |
 | `idea.set_aside` | each held-back candidate of `hypotheses.json`, with the objection that holds it back |
 | `hypothesis.checked` | `novelty_report.json` (`novelty` only; heuristic) |
 | `rule.checked` | rule 5, only after `hypotheses.json` passed the falsification contract |

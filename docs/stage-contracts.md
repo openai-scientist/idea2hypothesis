@@ -92,7 +92,8 @@ quality) are kept; the others that cleared both bars are `below_cutoff` with the
 reason. Papers that never received scores (`unscored`, `prefiltered`) carry
 `null` scores and are excluded; they never get default values. `shortlist.jsonl`: the kept
 candidates plus `relevance_score`, `quality_score` in `[0, 1]` and `keep_reason`.
-`screen_meta.json`: `outcome`, counts, `keywords`, batches. `review.json` `reviewer_view` lists
+`screen_meta.json`: `outcome`, counts, `keywords`, batches, `no_abstract` (how many of the
+`prefiltered` papers had no abstract). `review.json` `reviewer_view` lists
 what the reviewer model saw of each paper (`fields`, `abstract_max_chars`); a decision on an
 abstract longer than that carries `abstract_cut_at`.
 
@@ -138,7 +139,8 @@ read as before.
 `hypotheses.json`: `hypotheses` (between `research.min_hypotheses` and `research.max_hypotheses`,
 default 3 to 6, never fewer than 2) with `id`, `statement`, `gap_id` (a real gap),
 `sub_question_ids`, `evidence_refs` (card ids or shortlisted paper ids that resolve), `exposure`,
-`outcome`, `estimand`, `method`, `conditions`, `prediction` (`> 0`, `< 0` or `≠ 0`),
+`outcome`, `estimand`, `method`, `conditions`, `prediction` (`> 0`, `< 0`, `≠ 0`, or `≈ 0` for a negligible effect, which then needs
+`equivalence_margin`, a positive number in the outcome's unit),
 `falsification_criteria` (at least 25 characters and a concrete failing observation such as a
 threshold or interval), `limitations`, `rationale`, `novelty`, `risk`. `novelty` and `rationale`
 must differ between hypotheses (near-duplicates fail the stage). `tension_ids` lists the synthesis
@@ -155,9 +157,18 @@ against each hypothesis's sources: `contested` (fatal objections: `candidate`, `
 `severity`, `flaw`, `field`, `card_id`, `text`) and `caveats` (same fields; each caveat is also
 added to `limitations` as "Debate caveat from the <role> perspective: ..."). `held_back` lists the
 candidates with a fatal objection standing that the set does not use (`candidate`, `role`,
-`number`, `hypothesis`, `objections`). After the hypotheses gate, `human_review` holds the
-reviewer's `dropped` and `kept`, and a kept candidate joins the set under a new id with
-`kept_by_reviewer` (the reviewer's note) and its objections still in `contested`.
+`number`, `hypothesis`, `objections`). `not_used` lists every other candidate the set leaves out
+(`candidate`, `role`, `number`, `hypothesis`, `reason`, `of`, `text`, `caveats`): the merge must
+give each one a `reason`, `duplicate` (with `of`, the final hypothesis that already tests its
+claim, with the same `prediction`; two `≈ 0` claims that differ only in margin are one study, so
+the one left out is a duplicate and its `text` names both margins) or `over_limit` (only when the
+set has `max_hypotheses`), or the answer is sent back.
+A hypothesis built from two or more candidates needs `merge_note` (what it takes from each), and
+candidates whose predictions differ (including a benefit and a negligible effect, or two negligible
+effects with different `equivalence_margin`) are never merged; `merge_note` is kept only on a hypothesis with two or more sources. After the hypotheses gate,
+`human_review` holds the reviewer's `dropped` and `kept`, and a kept candidate (held back or not
+used) joins the set under a new id with `kept_by_reviewer` (the reviewer's note); a held-back one
+keeps its objections in `contested`.
 
 `perspectives/` holds the per-role generations (`<role>.json`) and, when `llm.debate_rounds > 0`,
 each round in three phases plus `debate_record.json`:
@@ -174,8 +185,11 @@ each round in three phases plus `debate_record.json`:
   place of the challenge in its `responses`, `hypothesis`, `action` `revise`, `defend` or
   `withdraw`, `text`), the updated `hypotheses` (numbering kept, new ones at the end), `revised`,
   `added` and `withdrawn` (hypothesis numbers). An answer that leaves a challenge unanswered, says
-  `revise` without changing the statement, or withdraws a hypothesis it does not list in
-  `withdrawn` is sent back. A role whose answer still fails keeps its position, a warning names
+  `revise` without changing any field of the hypothesis (the field the challenge is about need
+  not be the statement), or withdraws a hypothesis it does not list in
+  `withdrawn`, or leaves a negligible-effect (`≈ 0`) hypothesis without a positive
+  `equivalence_margin` is sent back (a perspective's own proposals follow the same margin
+  rule). A role whose answer still fails keeps its position, a warning names
   the unanswered challenges, and they stand as raised.
 * `<role>.r<N>.review.json` (`phase: "review"`), for each critic with answered challenges or with
   hypotheses added that round by others: `reviews`, one per answered challenge (the challenge with
@@ -198,6 +212,9 @@ written by earlier versions hold `responses` and the revised `hypotheses` in one
 `novelty_report.json` (when enabled): `kind: "novelty_assessment"`, a `disclaimer` stating it is a
 heuristic assessment and not proof of novelty, `novelty_score`, `assessment`, `recommendation`,
 `similar_papers`, `per_hypothesis[{hypothesis_id, closest_paper}]`, search coverage and errors.
+`search_coverage` is `full`, `partial`, `run_corpus_only` (the search returned nothing, so only
+the stage 4 pool was compared; the recommendation is then at most `proceed_with_caution` and the
+stage warns) or `insufficient`.
 
 ## Stage 9: ARGUMENT_MAP
 

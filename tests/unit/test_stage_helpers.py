@@ -4,11 +4,13 @@ import asyncio
 
 import pytest
 
+from idea2hypothesis.api.platform_events import _hypothesis_payload, _set_aside_events
 from idea2hypothesis.pipeline.contracts import (
     check_card_quotes,
     check_hypotheses,
     check_synthesis,
     check_tensions,
+    normalise_margin,
     normalise_prediction,
     normalise_quote,
     unsupported_numbers,
@@ -21,6 +23,7 @@ from idea2hypothesis.stages.hypothesis_debate import (
     Objection,
     check_answers,
     check_critique,
+    check_perspective,
     check_review,
 )
 from idea2hypothesis.stages.hypothesis_gen import check_merge
@@ -72,6 +75,19 @@ def test_prefilter_splits_by_keyword_overlap_and_sorts_by_overlap() -> None:
     keep, dropped = screen.prefilter(candidates, ["sleep", "exam", "students"])
     assert [r["paper_id"] for r in keep] == ["c", "b"]
     assert [r["paper_id"] for r in dropped] == ["a"]
+
+
+def test_prefilter_sets_aside_papers_without_an_abstract() -> None:
+    candidates = [
+        {"paper_id": "a", "title": "Sleep and exam meta-analysis", "abstract": None},
+        {"paper_id": "b", "title": "Sleep and exam", "abstract": "  "},
+        {"paper_id": "c", "title": "Sleep", "abstract": "exam sleep students"},
+    ]
+    keep, dropped = screen.prefilter(candidates, ["sleep", "exam"])
+    assert [r["paper_id"] for r in keep] == ["c"]
+    assert [r["paper_id"] for r in dropped] == ["a", "b"]
+    assert "no abstract" in screen._prefiltered(dropped[0])["reason"]
+    assert "keyword" in screen._prefiltered({"paper_id": "d", "abstract": "x"})["reason"]
 
 
 def test_topic_keywords_include_domain_terms() -> None:
@@ -149,7 +165,15 @@ def test_unsupported_numbers_ignores_single_digits_and_numbers_in_sources() -> N
 
 @pytest.mark.parametrize(
     ("raw", "canonical"),
-    [(">0", "> 0"), ("< 0", "< 0"), ("!= 0", "≠ 0"), ("≠0", "≠ 0"), ("positive", "positive")],
+    [
+        (">0", "> 0"),
+        ("< 0", "< 0"),
+        ("!= 0", "≠ 0"),
+        ("≠0", "≠ 0"),
+        ("~ 0", "≈ 0"),
+        ("≈0", "≈ 0"),
+        ("positive", "positive"),
+    ],  # fmt: skip
 )
 def test_prediction_normalisation(raw: str, canonical: str) -> None:
     assert normalise_prediction(raw) == canonical
@@ -307,10 +331,13 @@ def test_every_challenge_gets_an_answer_that_does_what_it_says() -> None:
     good = {"answers": answers((1, "revise"), (2, "withdraw")), "hypotheses": revised,
             "withdrawn": [2]}  # fmt: skip
     assert check_answers(good, before, challenges).ok
+    # a revision may change only the field the challenge is about
+    retested = [{**before[0], "falsification_criteria": "wrong if the CI includes 0"}, before[1]]
+    assert check_answers({**good, "hypotheses": retested}, before, challenges).ok
     cases = {
         "challenges [2] have no answer": {"answers": answers((1, "revise")),
                                           "hypotheses": revised},
-        "you revise hypothesis 1 but its statement is unchanged": {
+        "you revise hypothesis 1 but it is unchanged": {
             "answers": answers((1, "revise"), (2, "defend")), "hypotheses": before},
         "list 2 in withdrawn": {"answers": answers((1, "defend"), (2, "withdraw")),
                                 "hypotheses": before},
@@ -398,6 +425,146 @@ def test_the_final_set_uses_a_fatal_candidate_only_to_reach_the_minimum() -> Non
     )
     assert any("write between 2 and 6" in e for e in merge(["innovator-2"]))
     assert any("must list the candidate ids" in e for e in merge([], ["innovator-2"]))
+
+
+def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why() -> None:
+    def candidate(cid: str, prediction: str) -> Candidate:
+        role, _, n = cid.partition("-")
+        return Candidate(cid, role, int(n), {"prediction": prediction})
+
+    candidates = {
+        c.id: c
+        for c in (
+            candidate("pragmatist-1", "> 0"),
+            candidate("contrarian-1", "< 0"),
+            candidate("innovator-1", ">0"),
+            candidate("innovator-2", "> 0"),
+        )
+    }
+
+    def errors(hyps: list[dict], not_used: list[dict] | None = None, maximum: int = 6) -> str:
+        data = {"hypotheses": hyps, "not_used": not_used or []}
+        return " | ".join(check_merge(data, candidates, 2, maximum).errors)
+
+    note = "pragmatist-1 gives the claim; innovator-1 gives the test"
+    one = {
+        "id": "H1",
+        "from": ["pragmatist-1", "innovator-1"],
+        "merge_note": note,
+        "prediction": "> 0",
+    }
+    rest = [{"id": "H2", "from": ["contrarian-1"], "prediction": "< 0"},
+            {"id": "H3", "from": ["innovator-2"], "prediction": "> 0"}]  # fmt: skip
+    assert not errors([one, *rest])
+    assert "say in merge_note what it takes from each" in errors(
+        [{**one, "merge_note": " "}, *rest]
+    )
+    clash = {"id": "H1", "from": ["pragmatist-1", "contrarian-1"], "merge_note": note}
+    assert "predict different effects" in errors(
+        [clash, rest[1], {"id": "H3", "from": ["innovator-1"]}]
+    )
+    # innovator-2 is cleared and unused: it needs a reason
+    assert "candidates ['innovator-2'] are not used" in errors([one, rest[0]])
+    dup = {"candidate": "innovator-2", "reason": "duplicate", "of": "H1", "text": "same claim"}
+    assert not errors([one, rest[0]], [dup])
+    assert "names in 'of' the final hypothesis" in errors([one, rest[0]], [{**dup, "of": "H9"}])
+    full = {**dup, "reason": "over_limit", "of": None}
+    assert "there is room for innovator-2" in errors([one, rest[0]], [full])
+    assert not errors([one, rest[0]], [full], maximum=2)
+    assert "is used by the set" in errors([one, *rest], [{**dup, "candidate": "pragmatist-1"}])
+    assert "say why in text" in errors([one, rest[0]], [{**dup, "text": ""}])
+    # a duplicate repeats the claim of the hypothesis it names
+    assert "it is not a duplicate" in errors([one, rest[0]], [{**dup, "of": "H2"}])
+
+
+def test_a_benefit_and_a_negligible_effect_are_never_merged() -> None:
+    candidates = {
+        "pragmatist-3": Candidate("pragmatist-3", "pragmatist", 3, {"prediction": "> 0"}),
+        "contrarian-3": Candidate("contrarian-3", "contrarian", 3, {"prediction": "≈0"}),
+    }
+    merged = {"id": "H1", "from": ["pragmatist-3", "contrarian-3"], "merge_note": "both"}
+    data = {"hypotheses": [merged, {"id": "H2", "from": ["pragmatist-3"]}]}
+    errors = check_merge(data, candidates, 2, 6).errors
+    assert any("predict different effects" in e for e in errors)
+
+
+def test_a_negligible_effect_keeps_its_margin_through_the_debate() -> None:
+    before = [{"statement": "no lasting gain", "prediction": "≈ 0", "equivalence_margin": 0.1}]
+    challenges = [{"hypothesis": 1, "text": "the cards do not fix 0.1"}]
+    answer = {"answers": [{"challenge": 1, "action": "revise", "text": "removed the margin"}]}
+    dropped = [{**before[0], "equivalence_margin": None}]
+    errors = check_answers({**answer, "hypotheses": dropped}, before, challenges).errors
+    assert any("without one it cannot be tested" in e for e in errors)
+    widened = [{**before[0], "equivalence_margin": "0.2 SD"}]
+    assert check_answers({**answer, "hypotheses": widened}, before, challenges).ok
+    assert check_perspective({"hypotheses": [{"statement": "x", "prediction": "≈0"}]}).errors
+    assert check_perspective({"hypotheses": [{"statement": "WITHDRAWN", "prediction": "≈ 0"}]}).ok
+
+
+def test_negligible_effects_with_different_margins_are_never_merged() -> None:
+    def null(cid: str, margin: object) -> Candidate:
+        role, _, n = cid.partition("-")
+        return Candidate(cid, role, int(n), {"prediction": "≈ 0", "equivalence_margin": margin})
+
+    def errors(*margins: object) -> list[str]:
+        ids = [f"role{i}-1" for i in range(len(margins))]
+        candidates = {c: null(c, m) for c, m in zip(ids, margins, strict=True)}
+        merged = {"id": "H1", "from": ids, "merge_note": "both"}
+        data = {"hypotheses": [merged, {"id": "H2", "from": ids[:1]}]}
+        return check_merge(data, candidates, 2, 6).errors
+
+    assert any("different equivalence margins" in e for e in errors(0.1, 0.2))
+    # the same margin, also when one is written as text
+    assert not any("equivalence margins" in e for e in errors(0.1, "0.10 SD"))
+
+
+def test_a_negligible_effect_with_another_margin_is_left_out_as_a_duplicate() -> None:
+    candidates = {
+        "innovator-2": Candidate("innovator-2", "innovator", 2, {"prediction": "≈ 0",
+                                                                "equivalence_margin": 0.1}),
+        "pragmatist-2": Candidate("pragmatist-2", "pragmatist", 2, {"prediction": "≈ 0",
+                                                                  "equivalence_margin": "0.2 SD"}),
+        "pragmatist-1": Candidate("pragmatist-1", "pragmatist", 1, {"prediction": "> 0"}),
+    }  # fmt: skip
+    final = [
+        {"id": "H1", "from": ["innovator-2"], "prediction": "≈ 0", "equivalence_margin": 0.1},
+        {"id": "H2", "from": ["pragmatist-1"], "prediction": "> 0"},
+    ]
+    dup = {"candidate": "pragmatist-2", "reason": "duplicate", "of": "H1",
+           "text": "H1 tests the same null within ±0.1 rather than ±0.2"}  # fmt: skip
+    assert check_merge({"hypotheses": final, "not_used": [dup]}, candidates, 2, 6).ok
+    not_used = [{**dup, "hypothesis": candidates["pragmatist-2"].hypothesis}]
+    events = _set_aside_events({"hypotheses": final, "not_used": not_used})
+    assert events[0][1]["reason"].startswith(
+        "Not used: H1 tests the same negligible effect within ±0.1 rather than ±0.2."
+    )
+
+
+def test_a_negligible_effect_prediction_needs_its_equivalence_margin() -> None:
+    null = hypothesis(2, prediction="≈ 0", equivalence_margin=0.1)
+    assert check_hypotheses({"hypotheses": [hypothesis(1), null]}, {"G1"}, {"card-p-1"}).ok
+    for margin in (None, 0, -0.1, "about 0.1", True):
+        bad = {**null, "equivalence_margin": margin}
+        errors = check_hypotheses({"hypotheses": [hypothesis(1), bad]}, {"G1"}, {"card-p-1"}).errors
+        assert any("needs equivalence_margin" in e for e in errors), margin
+
+
+@pytest.mark.parametrize(
+    ("raw", "margin"),
+    [("0.10 baseline-SD units; effects within ±0.10 count", 0.1), ("±0.2", 0.2), (" .5 SD", 0.5),
+     (0.1, 0.1), ("about 0.1", "about 0.1"), ("1.2.3", "1.2.3")],
+)  # fmt: skip
+def test_an_equivalence_margin_written_as_text_keeps_its_number(
+    raw: object, margin: object
+) -> None:
+    assert normalise_margin(raw) == margin
+
+
+def test_a_negligible_effect_is_wrong_outside_its_margin_on_the_platform() -> None:
+    null = hypothesis(2, prediction="≈ 0", equivalence_margin=0.1, sub_question_ids=["SQ1"])
+    falsify = _hypothesis_payload(null)["falsify"]
+    assert falsify["zone"] == [None, None] and falsify["within"] == [-0.1, 0.1]
+    assert "within" not in _hypothesis_payload(hypothesis(1))["falsify"]
 
 
 def test_hypotheses_may_all_predict_the_same_direction() -> None:

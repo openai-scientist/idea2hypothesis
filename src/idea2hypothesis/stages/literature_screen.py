@@ -38,13 +38,22 @@ def topic_keywords(topic: str, domains: tuple[str, ...]) -> list[str]:
     return keywords
 
 
+def has_abstract(row: dict[str, Any]) -> bool:
+    """Cards are built from the abstract, so a paper without one cannot be read at stage 6."""
+    return bool(str(row.get("abstract") or "").strip())
+
+
 def prefilter(
     candidates: list[dict[str, Any]], keywords: list[str]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split into ``(to_screen, prefiltered)`` by keyword overlap with the topic and domains."""
+    """Split into ``(to_screen, prefiltered)``: papers without an abstract, and papers sharing no
+    keyword with the topic and domains, are not sent to the reviewer."""
     to_screen: list[tuple[int, dict[str, Any]]] = []
     dropped: list[dict[str, Any]] = []
     for row in candidates:
+        if not has_abstract(row):
+            dropped.append(row)
+            continue
         blob = f"{row.get('title', '')} {row.get('abstract', '')}".lower()
         overlap = sum(1 for kw in keywords if kw in blob)
         if overlap >= 1:
@@ -205,12 +214,16 @@ def _decision(
 
 
 def _prefiltered(row: dict[str, Any]) -> dict[str, Any]:
+    reason = (
+        "no keyword overlap with the topic or domains; not sent to the reviewer"
+        if has_abstract(row)
+        else "no abstract, so no evidence card can be built from it; not sent to the reviewer"
+    )
     return {
         "paper_id": str(row["paper_id"]), "title": row.get("title", ""),
         "year": row.get("year") or None, "venue": row.get("venue") or None,
         "relevance_score": None, "quality_score": None, "false_friend": None,
-        "decision": "prefiltered",
-        "reason": "no keyword overlap with the topic or domains; not sent to the reviewer",
+        "decision": "prefiltered", "reason": reason,
     }  # fmt: skip
 
 
@@ -224,8 +237,11 @@ async def run(ctx: StageContext) -> list[str]:
     keywords = topic_keywords(ctx.topic, ctx.domains)
     to_screen, dropped = prefilter(candidates, keywords)
     bypassed = False
-    if not to_screen:  # nothing overlaps: let the reviewer model judge everything instead
-        to_screen, dropped, bypassed = list(candidates), [], True
+    if not to_screen:  # nothing overlaps: let the reviewer model judge every paper it can read
+        to_screen = [r for r in candidates if has_abstract(r)]
+        dropped = [r for r in candidates if not has_abstract(r)]
+        bypassed = True
+    no_abstract = sum(1 for r in dropped if not has_abstract(r))
 
     batches = make_batches(to_screen)
     await ctx.progress(
@@ -233,6 +249,7 @@ async def run(ctx: StageContext) -> list[str]:
         candidates=len(candidates),
         to_screen=len(to_screen),
         batches=len(batches),
+        no_abstract=no_abstract,
         prefiltered=[_prefiltered(r) for r in dropped],
         rules=SCREEN_RULES,
         min_relevance=research.min_relevance,
@@ -326,6 +343,7 @@ async def run(ctx: StageContext) -> list[str]:
             "batches": len(batches),
             "keywords": keywords,
             "prefilter_bypassed": bypassed,
+            "no_abstract": no_abstract,
             "generated_at": utc_now(),
         },
     )

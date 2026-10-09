@@ -23,7 +23,7 @@ import httpx
 from idea2hypothesis.api.platform_events import (
     PlatformEventLog,
     PlatformProjector,
-    held_back_ids,
+    keepable_ids,
 )
 from idea2hypothesis.api.schemas import GateAnswerRequest, RunCreateRequest
 from idea2hypothesis.api.webhooks import (
@@ -356,7 +356,7 @@ class RunService:
         if gate["gate_id"] != gate_id:
             raise ServiceError(404, "Gate ID mismatch")
         art = self.store.artifacts(run_id)
-        answer = _core_answer(body, held_back_ids(art) if body.kept else {})
+        answer = _core_answer(body, keepable_ids(art) if body.kept else {})
         services = self.services()
         try:
             result = await apply_gate_answer(run_id, gate_id, answer, services)
@@ -893,15 +893,15 @@ class _Fanout:
             await sink.emit(event)
 
 
-def _core_answer(body: GateAnswerRequest, held_back: dict[str, str]) -> GateAnswer:
-    """``held_back`` maps a held-back hypothesis's thread id (T2) to its engine candidate id."""
+def _core_answer(body: GateAnswerRequest, keepable: dict[str, str]) -> GateAnswer:
+    """``keepable`` maps a set-aside candidate's thread id (T2) to its engine candidate id."""
     option = body.option_id
     dropped = tuple(body.dropped)
     note = body.note or ""
-    unknown = sorted(set(body.kept) - set(held_back))
+    unknown = sorted(set(body.kept) - set(keepable))
     if unknown:
-        raise ServiceError(422, f"kept hypotheses are not held back: {unknown}")
-    kept = tuple(held_back[k] for k in body.kept)
+        raise ServiceError(422, f"kept hypotheses are not set aside: {unknown}")
+    kept = tuple(keepable[k] for k in body.kept)
     if option in ("approve", "drop"):
         if option == "drop" and not (dropped or kept):
             raise ServiceError(422, "option 'drop' needs an id in 'dropped' or 'kept'")

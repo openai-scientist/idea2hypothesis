@@ -205,7 +205,6 @@ async def check_novelty(
 ) -> dict[str, Any]:
     """Compare hypotheses with retrieved papers; searches the literature port when provided."""
     statements = [str(h.get("statement", "")) for h in hypotheses]
-    keywords = extract_keywords(f"{topic}\n" + "\n".join(statements))
     queries = build_queries(topic, statements)
 
     candidates: list[dict[str, Any]] = []
@@ -233,25 +232,38 @@ async def check_novelty(
         if isinstance(row, dict):
             candidates.append(row)
 
-    similar: list[dict[str, Any]] = []
-    seen_titles: set[str] = set()
+    # Each paper is compared with each hypothesis on its own (keywords pooled over the whole set
+    # dilute every overlap); the overall assessment rests on the same comparisons.
+    hyp_keywords = [extract_keywords(s) for s in statements]
+    closest: dict[int, dict[str, Any]] = {}
+    by_title: dict[str, dict[str, Any]] = {}
     for row in candidates:
         title = str(row.get("title", ""))
-        sim = similarity(keywords, title, str(row.get("abstract", "")))
-        if sim >= similarity_threshold and title.lower() not in seen_titles:
-            seen_titles.add(title.lower())
-            similar.append(
-                _paper_view(
-                    str(row.get("paper_id", "")), title, row.get("year", 0),
-                    str(row.get("venue", "")), row.get("citation_count", 0),
-                    str(row.get("url", "")), str(row.get("cite_key", "")), sim,
-                )
+        abstract = str(row.get("abstract", ""))
+        sims = [
+            similarity(kw, title, abstract, s)
+            for kw, s in zip(hyp_keywords, statements, strict=True)
+        ]
+        for i, sim in enumerate(sims):
+            if i not in closest or sim > closest[i]["similarity"]:
+                closest[i] = {"title": title, "paper_id": str(row.get("paper_id", "")),
+                              "similarity": sim}  # fmt: skip
+        top = max(sims, default=0.0)
+        key = title.lower()
+        if top >= similarity_threshold and top > by_title.get(key, {}).get("similarity", -1):
+            by_title[key] = _paper_view(
+                str(row.get("paper_id", "")), title, row.get("year", 0),
+                str(row.get("venue", "")), row.get("citation_count", 0),
+                str(row.get("url", "")), str(row.get("cite_key", "")), top,
             )  # fmt: skip
-    similar.sort(key=lambda p: p["similarity"], reverse=True)
+    similar = sorted(by_title.values(), key=lambda p: p["similarity"], reverse=True)
 
     score, assessment = _assess(similar)
     if retrieved == 0 and not papers_already_seen:
         coverage = "insufficient"
+    elif retrieved == 0:
+        # Only the run's own papers were compared: no match there says nothing about the field.
+        coverage = "run_corpus_only"
     elif retrieved < 5:
         coverage = "partial"
     else:
@@ -262,25 +274,15 @@ async def check_novelty(
         recommendation = "differentiate_or_reconsider"
     elif assessment == "low":
         recommendation = "differentiate"
+    elif coverage == "run_corpus_only":
+        recommendation = "proceed_with_caution"
     else:
         recommendation = "proceed"
 
-    per_hypothesis = []
-    for hyp in hypotheses:
-        statement = str(hyp.get("statement", ""))
-        hyp_keywords = extract_keywords(statement)
-        best: dict[str, Any] | None = None
-        for row in candidates:
-            sim = similarity(
-                hyp_keywords, str(row.get("title", "")), str(row.get("abstract", "")), statement
-            )
-            if best is None or sim > best["similarity"]:
-                best = {
-                    "title": str(row.get("title", "")),
-                    "paper_id": str(row.get("paper_id", "")),
-                    "similarity": sim,
-                }
-        per_hypothesis.append({"hypothesis_id": hyp.get("id", ""), "closest_paper": best})
+    per_hypothesis = [
+        {"hypothesis_id": hyp.get("id", ""), "closest_paper": closest.get(i)}
+        for i, hyp in enumerate(hypotheses)
+    ]
 
     return {
         "kind": "novelty_assessment",

@@ -4,7 +4,10 @@ The perspectives propose candidates, the debate (``stages/hypothesis_debate.py``
 answers and reviews them, and the final merge builds the set from the candidates that survived:
 each final hypothesis names the candidates it is built from, carries the caveats that still stand
 against them, and is marked contested when one of them has a fatal objection standing. Candidates
-with a standing fatal objection that the set does not use are kept on record as held back.
+with a standing fatal objection that the set does not use are kept on record as held back; any
+other candidate the set leaves out is on record as not used, with the reason (a duplicate of a
+final hypothesis, or over the limit). A hypothesis merged from several candidates says what it
+takes from each, and candidates that predict different effects are never merged.
 """
 
 from __future__ import annotations
@@ -14,10 +17,13 @@ from typing import Any
 
 from idea2hypothesis.literature.novelty import check_novelty
 from idea2hypothesis.pipeline.contracts import (
+    EQUIVALENCE,
     MIN_HYPOTHESES,
+    PREDICTIONS,
     Findings,
     check_hypotheses,
     hypothesis_reference_sets,
+    normalise_margin,
     normalise_prediction,
     tension_ids,
 )
@@ -44,10 +50,18 @@ STAGE = 8
 
 
 def normalise_hypotheses(data: dict[str, Any]) -> None:
-    """Canonicalise prediction spellings in place before validation."""
+    """Canonicalise prediction spellings and equivalence margins in place before validation."""
     for hyp in data.get("hypotheses", []) if isinstance(data.get("hypotheses"), list) else []:
         if isinstance(hyp, dict):
             hyp["prediction"] = normalise_prediction(hyp.get("prediction"))
+            if "equivalence_margin" in hyp:
+                hyp["equivalence_margin"] = normalise_margin(hyp["equivalence_margin"])
+
+
+def _prediction(h: dict[str, Any]) -> str:
+    if h["prediction"] == EQUIVALENCE:
+        return f"{h['prediction']} (within ±{h.get('equivalence_margin')})"
+    return str(h["prediction"])
 
 
 def render_hypotheses_markdown(doc: dict[str, Any]) -> str:
@@ -62,13 +76,14 @@ def render_hypotheses_markdown(doc: dict[str, Any]) -> str:
             ("Estimand", h.get("estimand")),
             ("Method", h.get("method")),
             ("Conditions", h.get("conditions")),
-            ("Prediction", h["prediction"]),
+            ("Prediction", _prediction(h)),
             ("Falsified if", h["falsification_criteria"]),
             ("Rationale", h["rationale"]),
             ("Novelty", h["novelty"]),
             ("Risk", h.get("risk")),
             ("Settles tensions", ", ".join(h.get("tension_ids") or [])),
             ("Built from", ", ".join(h.get("from") or [])),
+            ("Merged", h.get("merge_note")),
         )
         lines += [f"- **{k}:** {v}" for k, v in rows if v]
         limits = h["limitations"] if isinstance(h["limitations"], list) else [h["limitations"]]
@@ -84,6 +99,13 @@ def render_hypotheses_markdown(doc: dict[str, Any]) -> str:
         for b in doc["held_back"]:
             lines.append(f"- **{b['candidate']}**: {b['hypothesis'].get('statement', '')}")
             lines += [f"  - {o['from']} ({o.get('flaw')}): {o['text']}" for o in b["objections"]]
+        lines.append("")
+    if doc.get("not_used"):
+        lines += ["## Not used", "", "No fatal objection stands against these candidates:", ""]
+        for u in doc["not_used"]:
+            why = f"same claim as {u['of']}" if u["reason"] == "duplicate" else "over the limit"
+            lines.append(f"- **{u['candidate']}** ({why}): {u['hypothesis'].get('statement', '')}")
+            lines.append(f"  - {u['text']}")
         lines.append("")
     if doc.get("open_tensions"):
         lines += ["## Open tensions", "", "Not settled by any hypothesis: "
@@ -152,11 +174,104 @@ async def _generate_perspectives(
     return current
 
 
+#: Why a candidate with no fatal objection standing is left out of the final set.
+NOT_USED_REASONS = ("duplicate", "over_limit")
+
+
+def _merge_problems(
+    tag: str, h: dict[str, Any], sources: list[str], candidates: dict[str, Candidate]
+) -> list[str]:
+    """A merge joins candidates that predict the same effect and says what each contributes."""
+    if len(set(sources)) < 2:
+        return []
+    problems = []
+    signs = {normalise_prediction(candidates[x].hypothesis.get("prediction")) for x in sources}
+    # Candidates are checked lightly; compare only predictions written in a canonical form.
+    if len(signs) > 1 and signs <= set(PREDICTIONS):
+        problems.append(
+            f"{tag}: merges candidates that predict different effects ({sorted(map(str, signs))});"
+            " keep them as separate hypotheses"
+        )
+    # Negligible-effect candidates also claim a size: "within ± margin".
+    margins = {
+        normalise_margin(candidates[x].hypothesis.get("equivalence_margin"))
+        for x in sources
+        if normalise_prediction(candidates[x].hypothesis.get("prediction")) == EQUIVALENCE
+    }
+    if len(margins) > 1:
+        problems.append(
+            f"{tag}: merges negligible-effect candidates with different equivalence margins "
+            f"({sorted(map(str, margins))}); keep the one whose margin the cards support and "
+            "list the other in not_used as its duplicate, naming both margins in text"
+        )
+    if not (isinstance(h.get("merge_note"), str) and h["merge_note"].strip()):
+        problems.append(f"{tag}: built from {sorted(set(sources))}; say in merge_note what it "
+                        "takes from each")  # fmt: skip
+    return problems
+
+
+def _predicts(h: dict[str, Any]) -> Any:
+    return normalise_prediction(h.get("prediction"))
+
+
+def _not_used_problems(
+    data: dict[str, Any],
+    items: list,
+    unused: set[str],
+    maximum: int,
+    candidates: dict[str, Candidate],
+) -> list[str]:
+    """Every candidate without a fatal objection that the set leaves out says why."""
+    raw = data.get("not_used") or []
+    if not isinstance(raw, list):
+        return ["not_used must be a list"]
+    final = {str(h.get("id")): h for h in items if isinstance(h, dict)}
+    problems, seen = [], set()
+    for i, entry in enumerate(raw):
+        c = entry.get("candidate") if isinstance(entry, dict) else None
+        tag = f"not_used[{i}]"
+        if c not in unused:
+            problems.append(f"{tag}: candidate {c!r} is used by the set or is held back by a "
+                            f"fatal objection; list only {sorted(unused)}")  # fmt: skip
+            continue
+        seen.add(c)
+        reason = entry.get("reason")
+        if reason not in NOT_USED_REASONS:
+            problems.append(f"{tag}: reason must be one of {list(NOT_USED_REASONS)}")
+        elif reason == "duplicate" and str(entry.get("of")) not in final:
+            problems.append(f"{tag}: a duplicate names in 'of' the final hypothesis that already "
+                            "makes its claim")  # fmt: skip
+        elif reason == "duplicate" and _predicts(candidates[c].hypothesis) != _predicts(
+            final[str(entry["of"])]
+        ):
+            # Two negligible-effect claims that differ only in margin are one study: a duplicate.
+            problems.append(
+                f"{tag}: {c} predicts {_predicts(candidates[c].hypothesis)} but {entry['of']} "
+                f"predicts {_predicts(final[str(entry['of'])])}; it is not a duplicate: use it, "
+                "or give over_limit when the set is full"
+            )
+        elif reason == "over_limit" and len(items) < maximum:
+            problems.append(f"{tag}: the set has {len(items)} of at most {maximum} hypotheses; "
+                            f"there is room for {c}")  # fmt: skip
+        if not _text(entry.get("text")):
+            problems.append(f"{tag}: say why in text")
+    missing = sorted(unused - seen)
+    if missing:
+        problems.append(f"candidates {missing} are not used; build hypotheses from them or list "
+                        "them in not_used with the reason")  # fmt: skip
+    return problems
+
+
+def _text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
 def check_merge(
     data: Any, candidates: dict[str, Candidate], minimum: int, maximum: int
 ) -> Findings:
-    """The final set's size, its sources, and the rule that a candidate with a fatal objection
-    standing is used only when the set cannot be filled from cleared ones."""
+    """The final set's size, its sources, the rule that a candidate with a fatal objection
+    standing is used only when the set cannot be filled from cleared ones, merges that keep
+    each source's claim, and a reason for every cleared candidate left out."""
     f = Findings()
     items = data.get("hypotheses") if isinstance(data, dict) else None
     if not isinstance(items, list):
@@ -167,7 +282,7 @@ def check_merge(
         f"write between {low} and {maximum} hypotheses (every candidate that survived, merged "
         f"where two say the same thing); got {len(items)}",
     )
-    clean, contested = 0, []
+    clean, contested, used = 0, [], set()
     for i, h in enumerate(items):
         if not isinstance(h, dict):
             continue
@@ -180,6 +295,9 @@ def check_merge(
         if unknown:
             f.error(f"{tag}: from {unknown} are not candidates (allowed: {sorted(candidates)})")
             continue
+        used |= set(sources)
+        for problem in _merge_problems(tag, h, sources, candidates):
+            f.error(problem)
         if any(candidates[x].fatal for x in sources):
             contested.append(str(h.get("id") or i))
         else:
@@ -189,6 +307,10 @@ def check_merge(
             f"hypotheses {contested} build on candidates whose fatal objection stands, while "
             f"{clean} are built from cleared ones; leave them out"
         )
+    if f.ok:
+        unused = {c.id for c in candidates.values() if not c.fatal and c.id not in used}
+        for problem in _not_used_problems(data, items, unused, maximum, candidates):
+            f.error(problem)
     return f
 
 
@@ -221,6 +343,23 @@ def _held_back(hypotheses: list[dict[str, Any]], candidates: dict[str, Candidate
         for c in candidates.values()
         if c.fatal and c.id not in used
     ]
+
+
+def _not_used(data: dict[str, Any], candidates: dict[str, Candidate]) -> list[dict[str, Any]]:
+    """Candidates with no fatal objection standing that the set leaves out, with the reason."""
+    out = []
+    for entry in data.get("not_used") or []:
+        c = candidates[entry["candidate"]]
+        out.append(
+            {
+                "candidate": c.id, "role": c.role, "number": c.number, "hypothesis": c.hypothesis,
+                "reason": entry["reason"],
+                "of": str(entry["of"]) if entry["reason"] == "duplicate" else None,
+                "text": _text(entry.get("text")),
+                "caveats": [o.summary() for o in c.caveats],
+            }
+        )  # fmt: skip
+    return out
 
 
 async def run(ctx: StageContext) -> list[str]:
@@ -282,6 +421,10 @@ async def run(ctx: StageContext) -> list[str]:
     hypotheses = data["hypotheses"]
     for h in hypotheses:
         h["tension_ids"] = [t for t in h.get("tension_ids") or [] if t in valid_tensions]
+        if len(set(h["from"])) < 2:
+            h.pop("merge_note", None)  # only a hypothesis merged from several candidates has one
+        if h["prediction"] != EQUIVALENCE:
+            h.pop("equivalence_margin", None)
     _annotate(hypotheses, candidates)
     settled = {t for h in hypotheses for t in h["tension_ids"]}
     doc = {
@@ -290,6 +433,9 @@ async def run(ctx: StageContext) -> list[str]:
         "hypotheses": hypotheses,
         # Candidates left out with a fatal objection standing; a reviewer may keep one.
         "held_back": _held_back(hypotheses, candidates),
+        # Candidates with no fatal objection that the set leaves out, with the reason; a
+        # reviewer may keep one too.
+        "not_used": _not_used(data, candidates),
         # Tensions of the synthesis that no hypothesis of the set settles.
         "open_tensions": sorted(valid_tensions - settled),
         "disagreements": [str(d) for d in data.get("disagreements") or []],
@@ -320,4 +466,15 @@ async def run(ctx: StageContext) -> list[str]:
         ctx.artifacts.write_json(STAGE, "novelty_report.json", report)
         if report["assessment"] == "insufficient_data":
             warnings.append("novelty assessment had insufficient search coverage")
+        elif report["search_coverage"] == "run_corpus_only":
+            errors = len(report["search_errors"])
+            why = (
+                f"{errors} search errors, listed in novelty_report.json"
+                if errors
+                else "the search returned nothing"
+            )
+            warnings.append(
+                "the novelty search found no new papers, so the hypotheses were compared only "
+                f"with the run's own papers ({why})"
+            )
     return [*warnings, *soft]

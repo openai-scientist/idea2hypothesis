@@ -38,7 +38,8 @@ blocks:
       "estimand": "the statistical or physical quantity to be estimated",
       "method": "how the claim would be tested",
       "conditions": "population or regime where the claim applies",
-      "prediction": "> 0   or   < 0   or   != 0   (sign of the expected effect)",
+      "prediction": "> 0   or   < 0   or   != 0   or   ≈ 0   (the expected effect: positive, negative, non-zero in either direction, or negligible)",
+      "equivalence_margin": 0.1,   (only for ≈ 0: a bare JSON number in the outcome's unit, no text or unit; effects within ± it count as negligible; null for the other predictions)
       "falsification_criteria": "the specific observation that would prove the claim WRONG, with a threshold or interval, not 'results differ from expectations'",
       "limitations": ["known boundary conditions or weaknesses"],
       "rationale": "the causal or physical mechanism that makes the claim plausible (unique to this hypothesis)",
@@ -50,13 +51,25 @@ blocks:
   objection_rules: |
     HOW SERIOUS AN OBJECTION IS (pick one for every challenge):
     - "fatal": the hypothesis cannot go forward as written. Name the flaw, exactly one of
-      "unsupported" (a claim the cited cards do not support), "unfalsifiable" (no result could
-      show it wrong), "undecidable_test" (the proposed test cannot tell the claim from its
-      alternative), "already_established" (a card already shows it; give that card's id in
-      "card_id"). Name the hypothesis field that holds the flaw in "field" (statement,
-      falsification_criteria, method, conditions, evidence_refs, ...).
+      "unsupported" (its mechanism or premise contradicts the cited cards, or rests on no card at
+      all; a new prediction the cards have not tested yet is NOT unsupported, since testing it
+      is the point of the hypothesis), "unfalsifiable" (no result could show it wrong),
+      "undecidable_test" (the proposed test cannot tell the claim from its alternative),
+      "already_established" (a card already shows it; give that card's id in "card_id"). Name
+      the hypothesis field that holds the flaw in "field" (statement, falsification_criteria,
+      method, conditions, evidence_refs, ...).
     - "caveat": a limit or risk worth recording; the hypothesis can still be tested as written.
     Call an objection fatal only when it is one of the four flaws; everything else is a caveat.
+    "concede" means you have no reservation at all. Any reservation, however small, is a
+    challenge with severity "caveat", so that its author answers it; never put a reservation in
+    the text of a concession.
+    THRESHOLDS (an equivalence_margin, a minimum effect, a cut-off) are operational choices the
+    author states; the cards rarely fix one. Challenge a threshold only when the cards show it is
+    wrong for this claim: it would count an effect a card reports as meaningful as negligible,
+    or it is finer than the measure's reliability can resolve. That the cards do not establish
+    it, or that another hypothesis uses a different one, is at most a caveat. A negligible-effect
+    hypothesis ("≈ 0") always keeps a positive equivalence_margin; removing it leaves the claim
+    untestable.
 
   hypothesis_quality: |
     QUALITY RULES FOR HYPOTHESES (all mandatory):
@@ -67,7 +80,10 @@ blocks:
     3. EVIDENCE-LED DIRECTION: the predicted sign of each hypothesis follows from its cited
        evidence and mechanism. Never flip or vary a sign to make the set look diverse; when the
        evidence points the same way for every hypothesis, predict that way. Consider costs,
-       trade-offs or interactions only where the evidence suggests them.
+       trade-offs or interactions only where the evidence suggests them. A claim that the effect
+       is negligible predicts "≈ 0" with an equivalence_margin, and its falsification criteria
+       say the claim is wrong when the confidence interval lies wholly outside that margin; never
+       write such a claim as "> 0", "< 0" or "!= 0".
     4. DISTINCT MECHANISMS: every `rationale` and every `novelty` argument must differ in
        substance from the others. Do not reuse template sentences.
     5. TRACEABLE: each hypothesis must reference one gap id and evidence references that exist in
@@ -405,6 +421,29 @@ stages:
       below). Build only from candidates marked CLEARED or CAVEATS. A candidate marked FATAL has
       an objection that stands; use one only when fewer than {{min_hypotheses}} final hypotheses
       can be built otherwise, and it is then reported as contested with its objection.
+      MERGING: merge candidates only when they make the same claim: the same exposure and
+      outcome, the same predicted sign, and the same claim about the size and the conditions of
+      the effect (for "≈ 0", the same equivalence_margin). Candidates that disagree (one predicts
+      an effect, another says it is too small to matter, absent, or present only under a
+      condition) are never merged into one: keep each as its own hypothesis, and when the limit
+      leaves no room for both, say so in "disagreements". A hypothesis built from two or more
+      candidates says in "merge_note" what it takes from each, naming their ids. Conversely, two
+      candidates with the same exposure, outcome, prediction and conditions make the same claim:
+      merge them, or say in each "rationale" the testable difference that sets them apart; never
+      keep two hypotheses whose tests would be the same study. Two "≈ 0" candidates that differ
+      only in equivalence_margin are the same study with two thresholds (a different margin is
+      not a testable difference), never merged into one: keep the one whose margin the cards
+      support (when they support both, the smaller margin, the stronger claim) and leave the
+      other out as its duplicate.
+      LEFT OUT: every CLEARED or CAVEATS candidate the set does not use goes in "not_used" with
+      its "reason": "duplicate" (a final hypothesis with the same prediction already tests its
+      claim; give that hypothesis's id in "of"; for "≈ 0" with another margin, name both margins
+      in "text") or "over_limit" (the set already has {{max_hypotheses}} hypotheses); "text"
+      says in one sentence why it is left out rather than another. When the limit forces you to
+      leave candidates out, leave out first those whose claim another final hypothesis already
+      contains (a part of a broader claim in the set), before any candidate that makes a claim no
+      final hypothesis tests. A FATAL candidate left out needs no entry; it is reported as held
+      back.
       When the synthesis lists tensions, at least one hypothesis of the set settles one of them
       (rule 7). Tensions the set leaves open are reported as open; do not attach a tension to a
       hypothesis that would not decide it.
@@ -432,7 +471,7 @@ stages:
       {{judge_assessment}}
 
       {{> json_rules}}
-      Return {"hypotheses": [ {... every schema field ..., "from": ["innovator-1"]} ], "disagreements": ["unresolved disagreement between perspectives", ...]}
+      Return {"hypotheses": [ {... every schema field ..., "from": ["innovator-1", "pragmatist-2"], "merge_note": "innovator-1 gives ...; pragmatist-2 gives ..."} ], "not_used": [{"candidate": "contrarian-3", "reason": "duplicate", "of": "H2", "text": "..."}], "disagreements": ["unresolved disagreement between perspectives", ...]}
 
   argument_map:
     json_mode: true
@@ -500,7 +539,8 @@ sub_prompts:
       Each answer is about one of their hypotheses: "to" is the perspective's name as written
       after ###, "hypothesis" is that hypothesis's number, "stance" is "challenge" (a weak point:
       a confound, a claim the cards do not support, a test that cannot fail, a tension it claims
-      to settle but would not decide) or "concede" (it is right as it stands), and "text" says
+      to settle but would not decide) or "concede" (it is right as it stands, with no
+      reservation), and "text" says
       why in one or two sentences. Do not name perspectives inside "text"; "to" already says whom
       you answer. Skip hypotheses marked WITHDRAWN.
       {{> objection_rules}}
@@ -535,7 +575,10 @@ sub_prompts:
       and you think it is only a caveat, say why here) or "withdraw" (you drop that hypothesis),
       and "text" gives your reason in one or two sentences. The challenger reviews every answer.
       Then write your full position in "hypotheses", in the same numbered order: a revised
-      hypothesis keeps its number and its statement changes; a defended one stays as it was; a
+      hypothesis keeps its number and the field the challenge is about changes (the statement
+      only when the claim itself changes); a defended one stays as it was. Change a threshold
+      (an equivalence_margin, a minimum effect, a cut-off) only for a reason from the cards, never
+      just to match another hypothesis; a
       withdrawn one stays in place unchanged and its number goes in "withdrawn"; one already
       marked WITHDRAWN above is written as {"statement": "WITHDRAWN"}. You may add a new
       hypothesis at the end to replace one you withdraw or one hit by a fatal challenge; it is
@@ -571,7 +614,8 @@ sub_prompts:
       is "resolved" (the answer removes the objection) or "stands" (it does not; "text" says
       what the answer leaves unaddressed, not the original point again). An objection that
       stands keeps its severity or is lowered from fatal to caveat; it is never raised. A fatal
-      one that stands names its flaw.
+      one that stands names its flaw. A threshold moved only to match another hypothesis, with no
+      reason from the cards, does not resolve an objection about that threshold.
       In "added", answer each added hypothesis as in a critique: "item" is its number, "stance"
       is "challenge" or "concede", with "severity", "flaw", "field" and "card_id" for a
       challenge. Leave "added" empty when there are none.

@@ -51,6 +51,7 @@ EMITTED = {
     "hypothesis.drafted",
     "hypothesis.checked",
     "hypothesis.selected",
+    "idea.set_aside",
     "map.node",
     "map.edge",
     "canvas.piece",
@@ -63,7 +64,6 @@ DROPPED = {
     "scope.estimate",
     "scope.adjusted",
     "estimate.checked",
-    "idea.set_aside",
 }
 STAGE_KEYS = {"scope", "search", "screen", "read", "synthesize", "r1-hypothesize", "map"}
 

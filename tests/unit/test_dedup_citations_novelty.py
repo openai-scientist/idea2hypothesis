@@ -141,6 +141,20 @@ async def test_novelty_report_is_labelled_and_per_hypothesis() -> None:
     assert 0.0 <= report["novelty_score"] <= 1.0
 
 
+async def test_the_overall_novelty_agrees_with_each_hypothesis() -> None:
+    hypotheses = [
+        {"id": "H1", "statement": "Quantum annealing improves protein folding bandwidth"},
+        {"id": "H2", "statement": "Sleep duration and academic performance in university students"},
+        {"id": "H3", "statement": "Glacier albedo shifts monsoon onset over coastal deltas"},
+    ]
+    report = await check_novelty("sleep and exams", hypotheses, literature=FixtureLiterature())
+    best = max(r["closest_paper"]["similarity"] for r in report["per_hypothesis"])
+    assert best >= report["similarity_threshold"]
+    # one close hypothesis is not diluted by the others
+    assert report["similar_papers_found"] >= 1
+    assert report["novelty_score"] <= round(1 - best, 3)
+
+
 async def test_novelty_without_any_coverage_is_flagged_not_perfect() -> None:
     class Failing:
         async def search(self, queries, *, limit, year_min=0):  # type: ignore[no-untyped-def]
@@ -152,6 +166,21 @@ async def test_novelty_without_any_coverage_is_flagged_not_perfect() -> None:
     assert report["assessment"] == "insufficient_data"
     assert report["recommendation"] == "proceed_with_caution"
     assert report["search_errors"]
+
+
+async def test_novelty_checked_only_against_the_run_papers_is_not_a_plain_proceed() -> None:
+    seen = [{"paper_id": "p-1", "title": "Sleep and exams", "abstract": "sleep duration exam"}]
+    report = await check_novelty(
+        "sleep and exams",
+        [{"id": "H1", "statement": "Quantum annealing improves protein folding bandwidth"}],
+        literature=FixtureLiterature([], source_errors={"openalex": "HTTP 429 (rate limited)"}),
+        papers_already_seen=seen,
+    )
+    assert report["total_papers_retrieved"] == 0
+    assert report["search_coverage"] == "run_corpus_only"
+    assert report["assessment"] == "high"
+    assert report["recommendation"] == "proceed_with_caution"
+    assert any("429" in e for e in report["search_errors"])
 
 
 def test_extract_keywords_drops_stop_words_and_short_tokens() -> None:

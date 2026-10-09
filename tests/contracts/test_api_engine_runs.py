@@ -177,11 +177,16 @@ async def test_the_hypotheses_gate_keeps_a_held_back_candidate_by_its_thread(
         await _answer(h, run_id)
         events = await h.events(run_id)
         gate = [e for e in events if e["type"] == "gate.opened"][-1]["payload"]
-        assert gate["kind"] == "hypotheses" and gate["keepable"] == ["T1"]
-        aside = next(e["payload"] for e in events if e["type"] == "idea.set_aside")
-        assert aside["idea_id"] == "T1" and "still no card" in aside["reason"]
+        # the held-back candidate first, then the cleared ones the set leaves out
+        assert gate["kind"] == "hypotheses" and gate["keepable"][0] == "T1"
+        assert gate["keepable"][1:] == [u["thread"] for u in gate["not_used"]]
+        asides = [e["payload"] for e in events if e["type"] == "idea.set_aside"]
+        assert asides[0]["idea_id"] == "T1" and "still no card" in asides[0]["reason"]
+        assert asides[1]["reason"].startswith("Not used: H")
+        assert "already makes this claim." in asides[1]["reason"]
+        assert [a["kind"] for a in asides[:2]] == ["held_back", "not_used"]
         unknown = await h.client.post(
-            f"/runs/{run_id}/gates/{gate['gate_id']}", json={"option_id": "drop", "kept": ["M3"]}
+            f"/runs/{run_id}/gates/{gate['gate_id']}", json={"option_id": "drop", "kept": ["T9"]}
         )
         assert unknown.status_code == 422
         # in the fixture the held-back candidate repeats H3's wording, so H3 makes room for it
@@ -194,7 +199,7 @@ async def test_the_hypotheses_gate_keeps_a_held_back_candidate_by_its_thread(
     resolved = [e for e in events if e["type"] == "gate.resolved"][-1]["payload"]
     assert resolved["answer"]["kept"] == ["T1"]
     assert resolved["summary"] == (
-        "Approved the hypotheses without 1 hypothesis and keeping T1 despite the objection."
+        "Approved the hypotheses without 1 hypothesis and keeping T1, set aside by the debate."
     )
     kept = [e["payload"]["hypothesis"] for e in events if e["type"] == "hypothesis.drafted"][-1]
     assert kept["id"] == "H4" and kept["from"] == ["T1"]

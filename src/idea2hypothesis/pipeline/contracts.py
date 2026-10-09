@@ -10,7 +10,6 @@ Validators come in two forms that share the same rules:
 
 from __future__ import annotations
 
-import json
 import re
 import unicodedata
 from collections.abc import Callable, Iterable
@@ -24,7 +23,9 @@ from idea2hypothesis.pipeline.models import Stage
 from idea2hypothesis.storage.artifacts import ArtifactStore
 
 SCHEMA_VERSION = 1
-PREDICTIONS = ("> 0", "< 0", "≠ 0")
+#: The expected effect: positive, negative, non-zero, or negligible (within ± equivalence_margin).
+PREDICTIONS = ("> 0", "< 0", "≠ 0", "≈ 0")
+EQUIVALENCE = "≈ 0"
 EVIDENCE_SCOPES = ("abstract", "full_text")
 DECISIONS = (
     "kept", "rejected", "below_cutoff", "unscored", "prefiltered", "dropped_by_reviewer"
@@ -530,18 +531,44 @@ def check_synthesis(
             if f.require(_str_list(ids), f"gaps[{i}] must be connected to evidence cards"):
                 f.require(set(ids) <= known_cards, f"gaps[{i}] references unknown cards")
     if source_text:
-        text = json.dumps(synthesis, ensure_ascii=False)
-        for number in unsupported_numbers(text, source_text)[:5]:
+        for number in unsupported_numbers(written_text(synthesis), source_text)[:5]:
             f.warn(f"synthesis mentions {number!r} which does not appear in any card")
     return f
 
 
+_LEADING_NUMBER = re.compile(r"^\s*[±+]?\s*(\d+(?:\.\d+)?|\.\d+)(?![\d.])")
+
+
+def normalise_margin(value: Any) -> Any:
+    """An equivalence margin written as text that starts with its number (``"0.10 SD units"``,
+    ``"±0.1"``) becomes that number; anything else is returned as given for the contract."""
+    if isinstance(value, str) and (m := _LEADING_NUMBER.match(value)):
+        return float(m.group(1))
+    return value
+
+
+def equivalence_problem(h: dict[str, Any], tag: str) -> str | None:
+    """Why a negligible-effect hypothesis (``≈ 0``) cannot be tested as written: it needs a
+    positive ``equivalence_margin``. None when it can, or when it predicts something else."""
+    if normalise_prediction(h.get("prediction")) != EQUIVALENCE:
+        return None
+    margin = normalise_margin(h.get("equivalence_margin"))
+    if isinstance(margin, int | float) and not isinstance(margin, bool) and margin > 0:
+        return None
+    return (
+        f"{tag}: a negligible-effect prediction (≈ 0) needs equivalence_margin, a positive "
+        "number in the outcome's unit written as a bare JSON number such as 0.1 (no text); "
+        "without one it cannot be tested"
+    )
+
+
 def normalise_prediction(value: Any) -> Any:
-    """Map common spellings of the three allowed predictions to their canonical form."""
+    """Map common spellings of the allowed predictions to their canonical form."""
     if not isinstance(value, str):
         return value
     compact = re.sub(r"\s+", "", value)
-    mapping = {">0": "> 0", "<0": "< 0", "≠0": "≠ 0", "!=0": "≠ 0", "=/=0": "≠ 0"}
+    mapping = {">0": "> 0", "<0": "< 0", "≠0": "≠ 0", "!=0": "≠ 0", "=/=0": "≠ 0",
+               "≈0": "≈ 0", "~0": "≈ 0", "~=0": "≈ 0"}  # fmt: skip
     return mapping.get(compact, value)
 
 
@@ -589,6 +616,9 @@ def check_hypotheses(
             h.get("prediction") in PREDICTIONS,
             f"{tag}: prediction must be one of {list(PREDICTIONS)}",
         )
+        problem = equivalence_problem(h, tag)
+        if problem:
+            f.error(problem)
         crit = h.get("falsification_criteria")
         if f.require(_text(crit), f"{tag}: falsification_criteria is required"):
             f.require(
@@ -628,6 +658,23 @@ def _check_distinct(f: Findings, items: list[Any], key: str) -> None:
             (a_id, a), (b_id, b) = texts[i], texts[j]
             if a and b and (a == b or SequenceMatcher(None, a, b).ratio() >= 0.92):
                 f.error(f"hypotheses {a_id} and {b_id} repeat the same {key} text")
+
+
+#: Stored fields the model did not write: a stamp's digits are not claims about the evidence.
+_NOT_WRITTEN = frozenset({"schema_version", "topic", "generated_at"})
+
+
+def written_text(value: Any) -> str:
+    """The prose of a model answer: its strings, without ids, references or stamps."""
+    if isinstance(value, dict):
+        return " ".join(
+            written_text(v)
+            for k, v in value.items()
+            if k not in _NOT_WRITTEN and k != "id" and not k.endswith(("_id", "_ids"))
+        )
+    if isinstance(value, list):
+        return " ".join(written_text(v) for v in value)
+    return value if isinstance(value, str) else ""
 
 
 def unsupported_numbers(text: str, source_text: str) -> list[str]:

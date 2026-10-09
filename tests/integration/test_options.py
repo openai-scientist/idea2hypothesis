@@ -216,7 +216,7 @@ async def test_source_errors_are_recorded_in_search_meta_and_warnings(tmp_path: 
     assert any("429" in w for w in completed[0].data["warnings"])
 
 
-async def test_papers_without_abstracts_get_no_card(tmp_path: Path) -> None:
+async def test_papers_without_abstracts_are_set_aside_before_screening(tmp_path: Path) -> None:
     papers = make_fixture_papers()
     import dataclasses
 
@@ -227,10 +227,36 @@ async def test_papers_without_abstracts_get_no_card(tmp_path: Path) -> None:
     result = await run_pipeline(request(), services)
     assert result.status is RunStatus.COMPLETED
     art = services.store.artifacts(result.run_id)
+    review = art.read_json(5, "review.json")
+    blank = next(d for d in review["decisions"] if d["title"] == papers[0].title)
+    assert blank["decision"] == "prefiltered" and blank["relevance_score"] is None
+    assert "no abstract" in blank["reason"]
+    assert art.read_json(5, "screen_meta.json")["no_abstract"] == 1
     meta = art.read_json(6, "knowledge_meta.json")
-    assert meta["cards"] == 8 and len(meta["skipped"]) == 1
-    assert meta["skipped"][0]["reason"] == "no abstract available"
+    assert meta["cards"] == 8 and meta["skipped"] == []
     assert len(list((art.stage_dir(6) / "cards").glob("*.json"))) == 8
+
+
+async def test_a_failed_novelty_search_is_reported_not_read_as_novel(tmp_path: Path) -> None:
+    # Stage 4 searches one query at a time; the novelty check searches several at once.
+    literature = FixtureLiterature(outage=lambda queries: len(queries) > 1)
+    services = make_services(tmp_path, literature=literature, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+    assert result.status is RunStatus.COMPLETED
+    report = services.store.artifacts(result.run_id).read_json(8, "novelty_report.json")
+    assert report["total_papers_retrieved"] == 0
+    assert report["search_coverage"] == "run_corpus_only"
+    assert report["recommendation"] in ("proceed_with_caution", "differentiate",
+                                        "differentiate_or_reconsider")  # fmt: skip
+    completed = [
+        e
+        for e in services.store.read_events(result.run_id)
+        if e.stage == 8 and e.type == "stage.completed"
+    ]
+    assert any(
+        "compared only with the run's own papers" in w and "search errors" in w
+        for w in completed[0].data["warnings"]
+    )
 
 
 async def test_when_no_paper_matches_the_topic_keywords_the_reviewer_judges_all(

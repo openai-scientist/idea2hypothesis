@@ -59,8 +59,7 @@ roles:
         Critically examine the synthesis and generate 3 or 4 contrarian hypotheses. Each one
         challenges a widely held assumption in this area, gives the evidence or reasoning why the
         mainstream view may be wrong, and proposes an alternative that accounts for overlooked
-        factors. Include at least one hypothesis whose prediction is a cost, trade-off or null
-        effect. Potentially informative negative results go in `limitations`.
+        factors. Potentially informative negative results go in `limitations`.
 
         Topic: {{topic}}
         Research constraints: {{constraints}}

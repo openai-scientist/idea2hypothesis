@@ -155,8 +155,8 @@ hypothesize (8).
   capped at 15 minutes. A router that ignores `stream` and returns one JSON body still works.
 * Stages ask for one JSON object per prompt. An invalid answer is sent back once per allowed
   retry with the list of errors; if it is still invalid the stage fails (`LLM_OUTPUT_INVALID`).
-* Screening pre-filters candidates by keyword overlap (listed in `review.json` as `prefiltered`
-  with no scores) and scores the rest in batches with the model; papers the model did not
+* Screening pre-filters candidates without an abstract or keyword overlap (listed in
+  `review.json` as `prefiltered` with no scores) and scores the rest in batches with the model; papers the model did not
   score are excluded as `unscored`.
 * Stage 8 generates hypotheses per perspective role, optionally runs debate rounds
   (`llm.debate_rounds`; each a critique of the others with a severity per challenge, every

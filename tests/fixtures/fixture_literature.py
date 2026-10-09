@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 
 from idea2hypothesis.literature.dedup import deduplicate
 from idea2hypothesis.literature.models import (
@@ -80,14 +81,19 @@ class FixtureLiterature:
         papers: list[Paper] | None = None,
         *,
         source_errors: dict[str, str] | None = None,
+        outage: Callable[[list[str]], bool] | None = None,
     ) -> None:
         self.papers = make_fixture_papers() if papers is None else papers
         self.source_errors = source_errors or {}
+        self.outage = outage
         self.calls: list[list[str]] = []
 
     async def search(self, queries: list[str], *, limit: int, year_min: int = 0) -> SearchReport:
         self.calls.append(list(queries))
         report = SearchReport(per_source={"openalex": SourceStats(), "arxiv": SourceStats()})
+        if self.outage is not None and self.outage(queries):
+            report.per_source["openalex"].errors.append("HTTP 429 (rate limited)")
+            return report
         for name, message in self.source_errors.items():
             report.per_source.setdefault(name, SourceStats()).errors.append(message)
         collected: list[Paper] = []

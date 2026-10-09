@@ -434,14 +434,22 @@ class FixtureLLM:
         return {"rankings": [{"role": "any", "score": 7, "reason": "solid"}]}
 
     def _default_hypothesis_gen(self, info: PromptInfo) -> dict[str, Any]:
-        """Three hypotheses from the first candidates without a standing fatal objection."""
+        """Three hypotheses from the first candidates without a standing fatal objection; the
+        other such candidates are left out as duplicates."""
         candidates = re.findall(r"^### ([a-z_]+-\d+) \[(\w+)\]", info.user, re.MULTILINE)
         usable = [c for c, label in candidates if label != "FATAL"]
         usable += [c for c, label in candidates if label == "FATAL"]
         hypotheses = self._hypotheses(info, "final", 3)
         for h, source in zip(hypotheses, usable, strict=False):
             h["from"] = [source]
-        return {"hypotheses": hypotheses, "disagreements": ["effect size"]}
+        cleared = [c for c, label in candidates if label != "FATAL"]
+        # A perspective's hypothesis n predicts what the final Hn predicts.
+        not_used = [
+            {"candidate": c, "reason": "duplicate", "of": f"H{c.rsplit('-', 1)[1]}",
+             "text": "same claim"}
+            for c in cleared[3:]
+        ]  # fmt: skip
+        return {"hypotheses": hypotheses, "not_used": not_used, "disagreements": ["effect size"]}
 
     def _default_argument_map(self, info: PromptInfo) -> dict[str, Any]:
         claims = info.section_json("Claims and their cards:\n", "Hypotheses:")

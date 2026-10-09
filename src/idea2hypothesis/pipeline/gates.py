@@ -93,6 +93,12 @@ def gate_payload(spec: GateSpec, artifacts: ArtifactStore) -> dict[str, Any]:
                  "statement": b["hypothesis"].get("statement", ""), "objections": b["objections"]}
                 for b in doc.get("held_back") or []
             ],
+            "not_used": [
+                {"candidate": u["candidate"], "role": u["role"], "number": u["number"],
+                 "statement": u["hypothesis"].get("statement", ""), "reason": u["reason"],
+                 "of": u.get("of"), "text": u.get("text", "")}
+                for u in doc.get("not_used") or []
+            ],
             "open_tensions": doc.get("open_tensions") or [],
         }  # fmt: skip
     goal = artifacts.read_json(1, "goal.json")
@@ -144,8 +150,9 @@ def apply_hypothesis_review(
 ) -> int:
     """Apply the reviewer's changes to the final set; returns its new size.
 
-    Dropped hypotheses leave the set. A kept held-back candidate joins it under a new id, still
-    marked contested with its objection, and must pass the hypothesis contract on its own.
+    Dropped hypotheses leave the set. A kept candidate (held back or not used) joins it under a
+    new id, a held-back one still marked contested with its objection, and must pass the
+    hypothesis contract on its own.
     """
     from idea2hypothesis.pipeline.contracts import (  # noqa: PLC0415 - avoids an import cycle
         check_hypotheses,
@@ -153,6 +160,7 @@ def apply_hypothesis_review(
         tension_ids,
     )
     from idea2hypothesis.stages.hypothesis_gen import (  # noqa: PLC0415
+        normalise_hypotheses,
         render_hypotheses_markdown,
     )
 
@@ -162,9 +170,10 @@ def apply_hypothesis_review(
     if unknown:
         raise GateError(f"dropped hypotheses are not in the set: {unknown}")
     held = {str(b["candidate"]): b for b in doc.get("held_back") or []}
-    unknown = sorted(set(kept) - set(held))
+    unused = {str(u["candidate"]): u for u in doc.get("not_used") or []}
+    unknown = sorted(set(kept) - set(held) - set(unused))
     if unknown:
-        raise GateError(f"kept candidates are not held back: {unknown}")
+        raise GateError(f"kept candidates are not held back or set aside: {unknown}")
     remaining = [h for h in doc["hypotheses"] if str(h["id"]) not in set(dropped)]
     synthesis = artifacts.read_json(7, "synthesis.json")
     cards = [
@@ -178,14 +187,24 @@ def apply_hypothesis_review(
     next_number = max(numbers, default=0) + 1
     restored = []
     for cid in kept:
-        entry = held.pop(cid)
+        entry = held.pop(cid) if cid in held else unused.pop(cid)
         h = {**entry["hypothesis"], "id": f"H{next_number}"}
         next_number += 1
         h["from"] = [cid]
-        h["contested"] = entry["objections"]
-        h["caveats"] = []
+        h["contested"] = entry.get("objections") or []
+        h["caveats"] = entry.get("caveats") or []
+        limits = h.get("limitations")
+        limits = list(limits) if isinstance(limits, list) else [limits] if limits else []
+        h["limitations"] = limits + [
+            f"Debate caveat from the {c['from']} perspective: {c['text']}" for c in h["caveats"]
+        ]
         h["tension_ids"] = [t for t in h.get("tension_ids") or [] if t in tensions]
-        h["kept_by_reviewer"] = note.strip() or "Kept by the reviewer despite the objection."
+        normalise_hypotheses({"hypotheses": [h]})
+        h["kept_by_reviewer"] = note.strip() or (
+            "Kept by the reviewer despite the objection."
+            if h["contested"]
+            else "Kept by the reviewer although the set had left it out."
+        )
         problems = check_hypotheses({"hypotheses": [h, *remaining]}, gaps, refs, tensions).errors
         # Only what is wrong with the kept hypothesis itself (or that it repeats another).
         mine = [p for p in problems if re.search(rf"\b{h['id']}\b", p)]
@@ -198,6 +217,7 @@ def apply_hypothesis_review(
     settled = {t for h in remaining for t in h.get("tension_ids") or []}
     doc["hypotheses"] = remaining
     doc["held_back"] = list(held.values())
+    doc["not_used"] = list(unused.values())
     doc["open_tensions"] = sorted(tensions - settled)
     doc["human_review"] = {"decision": APPROVE, "dropped": list(dropped), "kept": list(kept),
                            "note": note}  # fmt: skip
@@ -242,4 +262,6 @@ def quality_advisories(stage: Stage, artifacts: ArtifactStore) -> list[str]:
         report = artifacts.read_json(n, "novelty_report.json")
         if report.get("assessment") in ("low", "critical"):
             notes.append(f"novelty assessment is {report['assessment']} (heuristic)")
+        if report.get("search_coverage") == "run_corpus_only":
+            notes.append("novelty was compared only with the run's own papers (search found none)")
     return notes

@@ -435,6 +435,31 @@ async def test_the_reviewer_drops_hypotheses_and_keeps_a_held_back_one(tmp_path:
     assert mapped == {"H1", "H2", "H4"}  # the map is drawn from the reviewed set
 
 
+async def test_the_reviewer_keeps_a_candidate_the_set_left_out(tmp_path: Path) -> None:
+    services, at_gate = await _at_hypotheses_gate(tmp_path, FixtureLLM())
+    art = services.store.artifacts(at_gate.run_id)
+    doc = art.read_json(8, "hypotheses.json")
+    used = {c for h in doc["hypotheses"] for c in h["from"]}
+    assert doc["not_used"] and all(u["candidate"] not in used for u in doc["not_used"])
+    assert {u["reason"] for u in doc["not_used"]} == {"duplicate"}
+    assert "## Not used" in art.read_text(8, "hypotheses.md")
+    opened = [e for e in services.store.read_events(at_gate.run_id) if e.type == "gate.opened"]
+    assert len(opened[-1].data["not_used"]) == len(doc["not_used"])
+    # a second hypothesis of its perspective argues from a mechanism the set does not use yet
+    pick = next(u["candidate"] for u in doc["not_used"] if u["number"] == 2)
+
+    done = await answer_gate(
+        at_gate.run_id, at_gate.gate["gate_id"], GateAnswer("approve", kept=(pick,)), services
+    )
+
+    assert done.status is RunStatus.COMPLETED
+    doc = art.read_json(8, "hypotheses.json")
+    kept = doc["hypotheses"][-1]
+    assert kept["id"] == "H4" and kept["from"] == [pick] and kept["contested"] == []
+    assert kept["kept_by_reviewer"] == "Kept by the reviewer although the set had left it out."
+    assert pick not in {u["candidate"] for u in doc["not_used"]}
+
+
 async def test_rejecting_the_hypotheses_writes_a_new_set_with_the_note(tmp_path: Path) -> None:
     llm = FixtureLLM()
     services, at_gate = await _at_hypotheses_gate(tmp_path, llm)

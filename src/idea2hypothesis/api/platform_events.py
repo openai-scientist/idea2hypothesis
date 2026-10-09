@@ -28,6 +28,7 @@ from typing import Any
 
 from idea2hypothesis.pipeline import events as ev
 from idea2hypothesis.pipeline import gates
+from idea2hypothesis.pipeline.contracts import normalise_margin
 from idea2hypothesis.pipeline.events import Event
 from idea2hypothesis.pipeline.models import Stage
 from idea2hypothesis.storage.artifacts import ArtifactStore, write_bytes_atomic
@@ -272,7 +273,7 @@ _STEPS: dict[str, tuple[str, str, int, str | None, str]] = {
         "pi",
         8,
         None,
-        "Approve the set, drop hypotheses, keep a held-back one, or ask for a new set.",
+        "Approve the set, drop hypotheses, keep one the debate set aside, or ask for a new set.",
     ),
     "questions": (
         "Lay out the questions",
@@ -895,7 +896,10 @@ _ACTOR_LETTERS = {"theorist": "T", "methodologist": "M", "skeptic": "S"}
 _ROLE_WORDS = re.compile(r"\b(" + "|".join(_ML_ROLES) + r")\b", re.IGNORECASE)
 #: Thread of the judge's ranking, which is about the positions, not one hypothesis.
 _VERDICT = "Verdict"
-_ZONES: dict[str, list[int | None]] = {"> 0": [None, 0], "< 0": [0, None], "≠ 0": [0, 0]}
+#: Where each prediction is wrong; a negligible effect ("≈ 0") is wrong outside its ``within``.
+_ZONES: dict[str, list[int | None]] = {
+    "> 0": [None, 0], "< 0": [0, None], "≠ 0": [0, 0], "≈ 0": [None, None]
+}  # fmt: skip
 
 
 #: Order of a round's documents: the critiques come before the authors' answers to them. A
@@ -1149,6 +1153,12 @@ def _hypothesis_payload(h: dict[str, Any]) -> dict[str, Any]:
             "text": h["falsification_criteria"],
             "zone": _ZONES.get(h["prediction"], [None, None]),
             "unit": h["outcome"],
+            # A negligible effect (≈ 0) is wrong anywhere outside ± its margin.
+            **(
+                {"within": [-h["equivalence_margin"], h["equivalence_margin"]]}
+                if h["prediction"] == "≈ 0" and h.get("equivalence_margin")
+                else {}
+            ),
         },
         "evidence_refs": h["evidence_refs"],
         "conditions": h.get("conditions"),
@@ -1157,6 +1167,7 @@ def _hypothesis_payload(h: dict[str, Any]) -> dict[str, Any]:
         "tension_ids": h.get("tension_ids") or [],
         # The debate candidates it is built from, as their threads (T1, M2).
         "from": [_candidate_thread(c) for c in h.get("from") or []],
+        **({"merge_note": _threaded(h["merge_note"])} if h.get("merge_note") else {}),
         "contested": [_objection_payload(o) for o in h.get("contested") or []],
         "caveats": [_objection_payload(o) for o in h.get("caveats") or []],
         **({"kept_by_reviewer": h["kept_by_reviewer"]} if h.get("kept_by_reviewer") else {}),
@@ -1167,6 +1178,16 @@ def _candidate_thread(candidate: str) -> str:
     """``innovator-2`` (a debate candidate) as its thread on the Platform, ``T2``."""
     role, _, number = candidate.rpartition("-")
     return _idea(role, int(number)) if number.isdigit() else candidate
+
+
+_CANDIDATE_IDS = re.compile(r"\b(" + "|".join(_ROLE_ACTORS) + r")-(\d+)\b", re.IGNORECASE)
+
+
+def _threaded(text: str) -> str:
+    """Model text that names candidates (``innovator-2``) as their threads (``T2``)."""
+    return _named(
+        _CANDIDATE_IDS.sub(lambda m: _idea(m.group(1).lower(), int(m.group(2))), str(text))
+    )
 
 
 def _objection_payload(o: dict[str, Any]) -> dict[str, Any]:
@@ -1181,19 +1202,35 @@ def _objection_payload(o: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def held_back_ids(art: ArtifactStore) -> dict[str, str]:
-    """Thread id (T2) of each held-back candidate of the current set -> its engine id."""
+def keepable_ids(art: ArtifactStore) -> dict[str, str]:
+    """Thread id (T2) of each candidate the current set leaves out (held back or not used) ->
+    its engine id."""
     if not art.exists(8, "hypotheses.json"):
         return {}
     doc = art.read_json(8, "hypotheses.json")
     return {
         _candidate_thread(str(b["candidate"])): str(b["candidate"])
-        for b in doc.get("held_back") or []
+        for b in [*(doc.get("held_back") or []), *(doc.get("not_used") or [])]
     }
 
 
-def _held_back_events(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    """Each held-back candidate as an idea set aside, with the objection that keeps it out."""
+def _not_used_reason(u: dict[str, Any], of: dict[str, Any]) -> str:
+    if u["reason"] != "duplicate":
+        return "Not used: the set was already full."
+    mine = normalise_margin(u["hypothesis"].get("equivalence_margin"))
+    theirs = of.get("equivalence_margin")
+    numbers = all(isinstance(m, int | float) and not isinstance(m, bool) for m in (mine, theirs))
+    if numbers and mine != theirs:
+        return (
+            f"Not used: {u['of']} tests the same negligible effect within ±{theirs:g} "
+            f"rather than ±{mine:g}."
+        )
+    return f"Not used: {u['of']} already makes this claim."
+
+
+def _set_aside_events(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Each candidate the set leaves out as an idea set aside: a held-back one with the
+    objection that keeps it out, one not used with the reason."""
     out = []
     for b in doc.get("held_back") or []:
         first = (b.get("objections") or [{}])[0]
@@ -1204,9 +1241,24 @@ def _held_back_events(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
                 "idea.set_aside",
                 {
                     "idea_id": _candidate_thread(str(b["candidate"])),
+                    "kind": "held_back",
                     "statement": _named(str(b["hypothesis"].get("statement", ""))),
                     "reason": f"Held back: the {who}'s objection stands ({flaw}). "
                     + _named(str(first.get("text") or "")),
+                },
+            )
+        )
+    final = {str(h.get("id")): h for h in doc.get("hypotheses") or []}
+    for u in doc.get("not_used") or []:
+        why = _not_used_reason(u, final.get(str(u.get("of"))) or {})
+        out.append(
+            (
+                "idea.set_aside",
+                {
+                    "idea_id": _candidate_thread(str(u["candidate"])),
+                    "kind": "not_used",
+                    "statement": _named(str(u["hypothesis"].get("statement", ""))),
+                    "reason": f"{why} {_threaded(str(u.get('text') or ''))}".strip(),
                 },
             )
         )
@@ -1221,7 +1273,7 @@ def _content_stage8(art: ArtifactStore, flags: Flags) -> StepEvents:
         "write": [
             ("hypothesis.drafted", {"hypothesis": _hypothesis_payload(h)}) for h in hypotheses
         ]
-        + _held_back_events(doc)
+        + _set_aside_events(doc)
         + [
             (
                 "rule.checked",
@@ -1479,6 +1531,8 @@ def step_note(art: ArtifactStore, step_id: str) -> str | None:
             tail += (
                 f"; {_plural(len(doc['held_back']), 'candidate')} held back by a fatal objection"
             )
+        if doc.get("not_used"):
+            tail += f"; {_plural(len(doc['not_used']), 'candidate')} not used"
         if settled:
             names = ", ".join(settled)
             tail += f"; {_plural(len(settled), 'tension')} of the literature settled ({names})"
@@ -1496,6 +1550,11 @@ def step_note(art: ArtifactStore, step_id: str) -> str | None:
         rows = report.get("per_hypothesis", [])
         similar = [float((r.get("closest_paper") or {}).get("similarity", 0)) for r in rows]
         novel = sum(1 for value in similar if value < threshold)
+        if report.get("search_coverage") == "run_corpus_only":
+            return (
+                f"{novel} of {len(rows)} have no close match among the run's own papers; the "
+                "search found no other papers, so this says little about novelty."
+            )
         return (
             f"{novel} of {len(rows)} have no close match among the papers found "
             "(word overlap, a heuristic, not proof of novelty)."
@@ -1664,6 +1723,7 @@ def gate_spec(mode: str, data: dict[str, Any], art: ArtifactStore) -> dict[str, 
 def _hypotheses_gate(mode: str, data: dict[str, Any]) -> dict[str, Any]:
     hypotheses = data.get("hypotheses", [])
     held = data.get("held_back", [])
+    unused = data.get("not_used", [])
     contested = [h["id"] for h in hypotheses if h.get("contested")]
     summary = [f"{_plural(len(hypotheses), 'hypothesis', 'hypotheses')} in the set, each built "
                "from debate candidates that survived the challenges"]  # fmt: skip
@@ -1676,6 +1736,11 @@ def _hypotheses_gate(mode: str, data: dict[str, Any]) -> dict[str, Any]:
         summary.append(
             f"{_plural(len(held), 'candidate')} held back by a fatal objection; you can keep one "
             "anyway, and the objection stays on record"
+        )
+    if unused:
+        summary.append(
+            f"{_plural(len(unused), 'candidate')} with no fatal objection left out "
+            "(a duplicate, or over the limit); you can keep one too"
         )
     if data.get("open_tensions"):
         summary.append(f"Tensions left open: {', '.join(data['open_tensions'])}")
@@ -1697,13 +1762,13 @@ def _hypotheses_gate(mode: str, data: dict[str, Any]) -> dict[str, Any]:
             },
             {
                 "id": "drop",
-                "label": "Change the set first" if held else "Remove some first",
+                "label": "Change the set first" if held or unused else "Remove some first",
                 "description": (
-                    "Click hypotheses to leave them out, or held-back ones to keep them."
-                    if held
+                    "Click hypotheses to leave them out, or set-aside ones to keep them."
+                    if held or unused
                     else "Click hypotheses to leave them out."
                 ),
-                "leads_to": "Removed ones are not mapped; kept ones stay marked contested",
+                "leads_to": "Removed ones are not mapped; kept ones keep any objection on record",
                 "confirm_label": "Choose what to change",
             },
             {
@@ -1715,9 +1780,10 @@ def _hypotheses_gate(mode: str, data: dict[str, Any]) -> dict[str, Any]:
             },
         ],
         "droppable": [h["id"] for h in hypotheses],
-        "keepable": [_candidate_thread(str(b["candidate"])) for b in held],
+        "keepable": [_candidate_thread(str(b["candidate"])) for b in [*held, *unused]],
         "hypotheses": hypotheses,
         "held_back": [{**b, "thread": _candidate_thread(str(b["candidate"]))} for b in held],
+        "not_used": [{**u, "thread": _candidate_thread(str(u["candidate"]))} for u in unused],
     }
 
 
@@ -2112,11 +2178,14 @@ def _progress_screen_plan(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
     prefiltered = data.get("prefiltered") or []
     out = [p.env("screen.criteria", criteria)]
     out += [p.env(*_rejected(d)) for d in prefiltered]
-    aside = (
-        f"; {len(prefiltered)} share no keyword with the topic and are set aside"
-        if prefiltered
-        else ""
-    )
+    no_abstract = int(data.get("no_abstract") or 0)
+    off_topic = len(prefiltered) - no_abstract
+    parts = []
+    if no_abstract:
+        parts.append(f"{_plural(no_abstract, 'paper')} without an abstract to read")
+    if off_topic:
+        parts.append(f"{_plural(off_topic, 'paper')} sharing no keyword with the topic")
+    aside = f"; set aside: {' and '.join(parts)}" if parts else ""
     out.append(
         p.say(
             f"Scoring {_plural(int(data['to_screen']), 'paper')} in "
@@ -2315,7 +2384,7 @@ def gate_summary(kind: str, option: str, dropped: list[str], kept: list[str]) ->
         many = "papers" if kind == gates.SCREEN else "hypotheses"
         parts.append(f"without {_plural(len(dropped), item, many)}")
     if kept:
-        parts.append(f"keeping {', '.join(kept)} despite the objection")
+        parts.append(f"keeping {', '.join(kept)}, set aside by the debate")
     return f"Approved the {noun}{' ' + ' and '.join(parts) if parts else ''}."
 
 

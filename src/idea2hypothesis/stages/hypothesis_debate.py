@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from idea2hypothesis.pipeline.contracts import Findings
+from idea2hypothesis.pipeline.contracts import Findings, equivalence_problem
 from idea2hypothesis.pipeline.models import StageContext
 from idea2hypothesis.stages.base import StageFailure, compact_json, gather_limited, request_json
 
@@ -40,8 +40,11 @@ def candidate_id(role: str, number: int) -> str:
     return f"{role}-{number}"
 
 
-def _statement(hypothesis: dict[str, Any]) -> str:
-    return str(hypothesis.get("statement", "")).strip()
+def _changed(after: dict[str, Any], before: dict[str, Any]) -> bool:
+    """Whether a revision changed any field of the hypothesis (its id aside)."""
+    return {k: v for k, v in after.items() if k != "id"} != {
+        k: v for k, v in before.items() if k != "id"
+    }
 
 
 def _number(value: Any) -> int | None:
@@ -62,19 +65,26 @@ def numbered(hyps: list[dict[str, Any]], withdrawn: set[int] | None = None) -> s
 
 
 def check_perspective(data: Any) -> Findings:
-    """Light structural check of one role's output; the strict contract applies to the final set."""
+    """Light structural check of one role's output; the strict contract applies to the final set.
+    A negligible-effect hypothesis must keep the margin that makes it testable."""
     f = Findings()
     items = data.get("hypotheses") if isinstance(data, dict) else None
     if f.require(
         isinstance(items, list) and items, "the answer needs a non-empty 'hypotheses' list"
     ):
         for i, h in enumerate(items):
-            f.require(
-                isinstance(h, dict)
-                and isinstance(h.get("statement"), str)
-                and h["statement"].strip(),
-                f"hypotheses[{i}] needs a statement",
-            )
+            if (
+                f.require(
+                    isinstance(h, dict)
+                    and isinstance(h.get("statement"), str)
+                    and h["statement"].strip(),
+                    f"hypotheses[{i}] needs a statement",
+                )
+                and h["statement"].strip() != "WITHDRAWN"
+            ):
+                problem = equivalence_problem(h, f"hypotheses[{i}]")
+                if problem:
+                    f.error(problem)
     return f
 
 
@@ -225,8 +235,9 @@ def challenge_list(challenges: list[Objection]) -> str:
 
 
 def check_answers(data: Any, before: list[dict[str, Any]], challenges: list[Any]) -> Findings:
-    """Every challenge is answered once; a revision changes the statement it revises; a
-    withdrawal lists the hypothesis it withdraws; the position keeps its numbering."""
+    """Every challenge is answered once; a revision changes the hypothesis it revises (any
+    field, as the challenge may be about the test rather than the claim); a withdrawal lists
+    the hypothesis it withdraws; the position keeps its numbering."""
     f = check_perspective(data)
     if not f.ok:
         return f
@@ -260,8 +271,9 @@ def check_answers(data: Any, before: list[dict[str, Any]], challenges: list[Any]
         k = challenge.hypothesis if isinstance(challenge, Objection) else challenge["hypothesis"]
         if action == "revise" and len(hyps) >= k and isinstance(hyps[k - 1], dict):
             f.require(
-                _statement(hyps[k - 1]) != _statement(before[k - 1]),
-                f"challenge {n}: you revise hypothesis {k} but its statement is unchanged",
+                _changed(hyps[k - 1], before[k - 1]),
+                f"challenge {n}: you revise hypothesis {k} but it is unchanged; change the "
+                "field the challenge is about",
             )
         if action == "withdraw":
             f.require(k in withdrawn, f"challenge {n}: you withdraw {k}; list {k} in withdrawn")
@@ -582,7 +594,7 @@ async def _answers(
         revised = [
             i
             for i, h in enumerate(hyps[: len(before)], 1)
-            if _statement(h) != _statement(before[i - 1]) and i not in gone
+            if _changed(h, before[i - 1]) and i not in gone
         ]
         doc = {
             "role": role,

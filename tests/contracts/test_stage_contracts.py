@@ -211,6 +211,22 @@ def test_stage7_unsupported_numbers_are_flagged_as_warnings(art: ArtifactStore) 
     assert findings.ok and any("47.3" in w for w in findings.warnings)
 
 
+def test_stage7_stamps_and_ids_are_not_read_as_numbers(art: ArtifactStore) -> None:
+    edit_json(
+        art,
+        7,
+        "synthesis.json",
+        lambda d: d.update(
+            generated_at="2026-10-09T18:56:21.222+00:00",
+            topic="Sleep in 2026 cohorts",
+            overview="Sleep raises scores by 47.3%.",
+        ),
+    )
+    warnings = validate_stage(Stage.SYNTHESIS, art).warnings
+    flagged = [w for w in warnings if "does not appear in any card" in w]
+    assert len(flagged) == 1 and "47.3" in flagged[0]
+
+
 def test_stage8_references_resolve_to_gaps_and_evidence(art: ArtifactStore) -> None:
     edit_json(art, 8, "hypotheses.json", lambda d: d["hypotheses"][0].update(gap_id="G99"))
     assert any("gap_id" in e for e in validate_stage(Stage.HYPOTHESIS_GEN, art).errors)

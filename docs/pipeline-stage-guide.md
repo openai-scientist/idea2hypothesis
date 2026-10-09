@@ -116,8 +116,10 @@ Output: `candidates.jsonl`, `references.bib` (one entry per candidate), `search_
 
 Module `stages/literature_screen.py`. Input: `stage-04/candidates.jsonl`, goal and problem tree.
 
-* **Cheap pre-filter.** Candidates with no keyword overlap with the topic or domains are marked
-  `prefiltered` with a reason and no scores; if nothing overlaps, the model judges everything.
+* **Cheap pre-filter.** Candidates without an abstract (no card can be built from them) and
+  candidates with no keyword overlap with the topic or domains are marked `prefiltered` with a
+  reason and no scores, so they never take a shortlist place; if nothing overlaps, the model
+  judges every paper that has an abstract.
 * **Whole abstracts.** The reviewer model sees the title, year, venue, citation count and the
   whole abstract (results and conclusions usually come last). Only an abstract over 5,000
   characters is cut, and its decision records `abstract_cut_at`; `review.json` `reviewer_view`
@@ -212,25 +214,32 @@ constraints and, with memory enabled, past anti-patterns.
   `research.min_hypotheses` and `research.max_hypotheses` (default 3 to 6). A candidate with a
   fatal objection standing is used only to reach the minimum and is then marked `contested`;
   otherwise it is `held_back`, on record with its objection. Caveats that stand are added to the
-  hypothesis's limitations. Each hypothesis names its sources in `from`.
+  hypothesis's limitations. Each hypothesis names its sources in `from`; a merged one says in
+  `merge_note` what it takes from each, and candidates that disagree (a different sign, or one
+  saying the effect is too small or conditional) are kept apart. Every other candidate left out
+  is `not_used` with its reason: a duplicate of a final hypothesis, or over the limit.
 * **Hypotheses gate** (`copilot` and `full`). The reviewer approves the set, drops hypotheses,
   keeps a held-back candidate despite its objection (it stays marked contested, with the
-  reviewer's note), or rejects the set: stage 8 runs again with the note and the previous set in
+  reviewer's note) or a candidate the set did not use, or rejects the set: stage 8 runs again with the note and the previous set in
   the perspectives' prompts. The argument map is drawn from the set the reviewer approved.
 * **Settling tensions.** When the synthesis lists tensions, at least one hypothesis of the final
   set must settle one: it predicts which side holds under which condition and names the tension
   in `tension_ids`. Tensions no hypothesis settles are listed in `open_tensions`, so the record
   shows what the set leaves untested.
 * **Falsifiability.** Every hypothesis states exposure, outcome, estimand, method, a prediction
-  (`> 0`, `< 0` or `≠ 0`), a falsification criterion with a concrete failing observation, a
+  (`> 0`, `< 0`, `≠ 0`, or `≈ 0` with an `equivalence_margin`), a falsification criterion with a concrete failing observation, a
   mechanism (`rationale`), and why it is new (`novelty`), and points to a real gap and to
   evidence (card or paper ids). Rationale and novelty text must differ between hypotheses.
 * **Evidence-led direction.** The predicted sign of each hypothesis follows its evidence. Nothing
   asks the set to predict opposite directions or to include a counter-intuitive claim; a contrast
   is proposed only when the cited cards give a reason for it.
-* **Novelty assessment** (`research.novelty_check`, default true). The hypotheses are compared
-  with papers retrieved by new queries and the stage 4 pool; the result is a heuristic score and
-  recommendation labelled as an assessment, not proof of novelty.
+* **Novelty assessment** (`research.novelty_check`, default true). Each hypothesis is compared
+  on its own with papers retrieved by new queries and the stage 4 pool, and the overall score
+  rests on the closest of those matches; the result is a heuristic score and
+  recommendation labelled as an assessment, not proof of novelty. When the search returns
+  nothing (for example every provider is rate limited), only the stage 4 pool is compared: the
+  report says `run_corpus_only`, the recommendation is at most `proceed_with_caution` and the
+  stage warns.
 * If no perspective yields usable hypotheses the stage fails (`NO_PERSPECTIVES`); defaults are
   never substituted.
 
