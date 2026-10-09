@@ -36,7 +36,7 @@ the entry points.
 
 Contracts and pass conditions are in [docs/stage-contracts.md](docs/stage-contracts.md).
 Review modes: `auto` and `light` have no manual gate (`light` adds advisory quality notes),
-`copilot` opens a gate after stage 5, `full` also gates after stage 2.
+`copilot` opens a gate after stage 5 and after stage 8, `full` also gates after stage 2.
 
 ## Install
 

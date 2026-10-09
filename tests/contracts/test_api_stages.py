@@ -286,7 +286,9 @@ async def test_stage5_approve_answers_the_open_screen_gate(tmp_path: Path) -> No
         approved = await h.client.post(f"/api/stage5/{run_id}/approve", params={"reason": "ok"})
         assert approved.json() == {"status": "gate_approved", "run_id": run_id}
         await h.settle()
-        assert (await h.state(run_id))["status"] == "completed"
+        # the run goes on to the hypotheses gate, the next stop in copilot mode
+        assert (await h.state(run_id))["status"] == "awaiting_review"
+        assert h.service.record(run_id)["gate"]["kind"] == "hypotheses"
         decision = (await h.client.get(f"/api/stage5/{run_id}/decision")).json()
         assert decision["status"] == "APPROVED" and decision["reason"] == "ok"
         again = await h.client.post(f"/api/stage5/{run_id}/approve")

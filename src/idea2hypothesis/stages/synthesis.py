@@ -6,6 +6,7 @@ from typing import Any
 
 from idea2hypothesis.pipeline.contracts import (
     CARD_FIELDS,
+    SIDED_TENSION_SCHEMA,
     card_source_text,
     check_synthesis,
     sub_question_ids,
@@ -46,10 +47,13 @@ def render_synthesis_markdown(synthesis: dict[str, Any]) -> str:
     tensions = synthesis.get("tensions") or []
     if tensions:
         lines += ["## Tensions", ""]
-        lines += [
-            f"- {' vs '.join(map(str, t.get('between', [])))}: {t.get('text', '')}"
-            for t in tensions
-        ]
+        for t in tensions:
+            head = f"{t['id']} " if t.get("id") else ""
+            between = " vs ".join(map(str, t.get("between", [])))
+            lines.append(f"- {head}{between}: {t.get('text', '')}")
+            for i, side in enumerate(t.get("sides") or [], 1):
+                cards = ", ".join(side.get("card_ids") or [])
+                lines.append(f"  - Side {i}: {side.get('claim', '')} ({cards})")
         lines.append("")
     lines += ["## Research gaps", ""]
     for g in synthesis["gaps"]:
@@ -93,9 +97,16 @@ async def run(ctx: StageContext) -> list[str]:
         ctx,
         prompt,
         label="synthesis",
-        validate=lambda d: check_synthesis(d, known_sq, included, source_text, every_card=True),
+        validate=lambda d: check_synthesis(
+            d, known_sq, included, source_text, every_card=True, sided_tensions=True
+        ),
     )
-    synthesis = {"schema_version": 1, "topic": ctx.topic, **data, "generated_at": utc_now()}
+    synthesis = {
+        "schema_version": SIDED_TENSION_SCHEMA,
+        "topic": ctx.topic,
+        **data,
+        "generated_at": utc_now(),
+    }
     ctx.artifacts.write_json(STAGE, "synthesis.json", synthesis)
     ctx.artifacts.write_text(STAGE, "synthesis.md", render_synthesis_markdown(synthesis))
     return [*dict.fromkeys(warnings), *soft]

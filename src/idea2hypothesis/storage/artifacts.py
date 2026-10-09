@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import time
 import uuid
@@ -171,6 +172,35 @@ class ArtifactStore:
             return json.loads(self._partial_path(stage, attempt, name).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+
+    # -- model call log ---------------------------------------------------
+    # Every model call of a stage, as sent and as answered, kept outside ``stage-NN`` so a rerun
+    # of the stage does not erase how an earlier try reached (or failed to reach) its result.
+
+    def llm_log_dir(self, stage: int, attempt: int) -> Path:
+        return self.run_dir / "llm_calls" / stage_dirname(stage) / f"attempt-{attempt}"
+
+    def write_llm_call(self, stage: int, attempt: int, label: str, record: Any) -> str:
+        """Store one call record; returns its path relative to the run directory."""
+        base = self.llm_log_dir(stage, attempt)
+        base.mkdir(parents=True, exist_ok=True)
+        slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")[:60] or "call"
+        # Numbered in call order; the count and the write run without an await in between.
+        number = sum(1 for _ in base.glob("*.json")) + 1
+        target = base / f"{number:04d}-{slug}.json"
+        write_json_atomic(target, record)
+        return str(target.relative_to(self.run_dir))
+
+    def read_llm_calls(self, stage: int, attempt: int) -> list[dict[str, Any]]:
+        """The call records of one stage attempt, in call order."""
+        base = self.llm_log_dir(stage, attempt)
+        rows: list[dict[str, Any]] = []
+        for path in sorted(base.glob("*.json")) if base.exists() else []:
+            try:
+                rows.append(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                continue
+        return rows
 
     # -- versioning -------------------------------------------------------
 

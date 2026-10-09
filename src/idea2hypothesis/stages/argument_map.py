@@ -412,7 +412,16 @@ def build_canvas(
                 for h in hypotheses
             ]
             + [
-                _item(t.get("text", ""), *map(str, t.get("between", [])))
+                # A tension is tied to its clusters and to the hypotheses that settle it.
+                _item(
+                    t.get("text", ""),
+                    *map(str, t.get("between", [])),
+                    *[
+                        str(h["id"])
+                        for h in hypotheses
+                        if t.get("id") in (h.get("tension_ids") or [])
+                    ],
+                )
                 for t in synthesis.get("tensions") or []
                 if t.get("text")
             ],

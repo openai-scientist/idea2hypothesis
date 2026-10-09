@@ -99,12 +99,18 @@ answers `503 LLM_NOT_CONFIGURED` and creates nothing.
 | Mode | Gates |
 | --- | --- |
 | `auto`, `light` | none (`light` adds `advisories` to `stage.completed`) |
-| `copilot` | `screen` gate after stage 5 |
-| `full` | `scope` gate after stage 2, `screen` gate after stage 5 |
+| `copilot` | `screen` gate after stage 5, `hypotheses` gate after stage 8 |
+| `full` | `scope` gate after stage 2, `screen` gate after stage 5, `hypotheses` gate after stage 8 |
 
 `reject` at the screen gate reruns stages 3-9 (attempt + 1, new gate id `gate-s05-a2`);
-`reject` at the scope gate reruns stages 1-9. Approving never bypasses validation or an empty
-shortlist.
+`reject` at the scope gate reruns stages 1-9; `reject` at the hypotheses gate reruns stages 8-9.
+A gate approved before the rollback point is not asked again. Approving never bypasses
+validation or an empty shortlist.
+
+The `hypotheses` gate (`gate-s08-a<attempt>`) carries `droppable` (hypothesis ids), `keepable`
+(held-back candidates by thread id, such as `T2`), `hypotheses`, `held_back` and `stage_key` (the
+UI group the answer belongs to). Its answer is `approve`, `drop` with `dropped` and/or `kept`, or
+`reject` with a note; `kept` ids that are not held back answer 422.
 
 ## Event stream
 
@@ -126,7 +132,7 @@ the parts are translated and delivered at once instead of when the stage complet
 | 4 collect | `literature.request` + `literature.batch` after each query (planned queries only) |
 | 5 screen | `screen.criteria` and the `prefiltered` rejections first, then per scored batch its `screen.scored` points and `screen.rejected` papers; `screen.kept` follows the final, capped shortlist |
 | 6 read | one `card.extracted` per card |
-| 8 hypothesize | `debate.turn` threads, one per hypothesis of each perspective; `hypothesis.drafted` and `rule.checked` before the novelty check |
+| 8 hypothesize | `debate.turn` threads, one per hypothesis of each perspective; in each debate round every role's critiques as soon as they are written, then every challenged role's answers; `hypothesis.drafted` and `rule.checked` before the novelty check |
 
 When the stage completes only what was not sent yet follows, so no part is sent twice. If a
 transient model error restarts stage 5, 6, 7 or 8, its `stage.started` is sent again: the run
@@ -148,16 +154,17 @@ closes it before its `step.completed`. Every number and name in it comes from th
 | `scope.profile` | `hardware_profile.json` (only with `research.hardware_advisory`) |
 | `scope.goal` | `goal.json` (fields title/problem/objective/scope/success) |
 | `scope.approved` | the scope gate approval (`full` mode only) |
-| `problem.subquestion`, `problem.risk`, `topic.evaluated` | `problem_tree.json`, `topic_evaluation.json` (the rating is also sent when it stops the run) |
+| `problem.subquestion`, `problem.risk`, `topic.evaluated` | `problem_tree.json`, `topic_evaluation.json` (the rating is also sent when it stops the run; `basis` says it is the model's judgement before any literature search) |
 | `search.strategy`, `search.query`, `search.sources` | `search_plan.yaml`, `queries.json`, `sources.json`; `delay_ms` is `literature.inter_query_delay_sec` |
 | `literature.request`, `literature.batch`, `literature.collected` | `search_meta.json` per-query hits and totals; expansion queries have no cell, so `literature.collected.expansion` gives their count and hits |
 | `literature.merged` | `candidates.jsonl`: one per paper found as several source records, each record with its own `citations` and `has_doi`; `kept` / `kept_record` name the record whose metadata was kept (most citations, then the longer abstract) |
 | `screen.criteria`, `screen.scored`, `screen.rejected`, `screen.kept` | `review.json`, `shortlist.jsonl` (one point per scored paper, every rejection with its reason; `decision` is `rejected`, `below_cutoff`, `unscored` or `prefiltered`; `screen.criteria.candidates` is the number of candidates) |
-| `card.extracted` | `cards/*.json` (`id` is the card id used by clusters and gaps; unknown fields are empty strings and listed in `unknown_fields`) |
-| `synthesis.cluster`, `.tension`, `.gap`, `.overview`, `.ranked` | `synthesis.json` |
+| `card.extracted` | `cards/*.json` (`id` is the card id used by clusters and gaps; unknown fields are empty strings and listed in `unknown_fields`; `quotes` maps each filled field to the abstract passages that back it, checked word for word) |
+| `synthesis.cluster`, `.tension`, `.gap`, `.overview`, `.ranked` | `synthesis.json`; from synthesis schema 2 a tension also has `id` (`X1`) and `sides` (`claim`, `card_ids`) |
 | `synthesis.set_aside` | `synthesis.json` `set_aside`: cards in no cluster, as `{aside: {id, card_ids, reason}}`; with the clusters they account for every card |
-| `debate.turn` | `perspectives/*.json`: each hypothesis of a perspective is a thread (`about`: `T1`, `M2`, `S1` for the Theorist, Methodologist and Skeptic) opened by a `propose` turn. With `llm.debate_rounds`, each rebuttal's `responses` become `challenge` and `concede` turns whose `reply_to` is the proposal they answer, its `revised` hypotheses `refine` turns and its `added` ones new `propose` turns. Engine perspective names in the text (innovator, pragmatist, contrarian) are replaced by the agents' names. The judge's ranking from `debate_record.json` is a `test` turn by `pi` (id `judge`, `about` `Verdict`) |
-| `hypothesis.drafted`, `hypothesis.selected` | `hypotheses.json` (`falsify.zone` derived from the validated `prediction`) |
+| `debate.turn` | `perspectives/*.json`: each hypothesis of a perspective is a thread (`about`: `T1`, `M2`, `S1` for the Theorist, Methodologist and Skeptic) opened by a `propose` turn. With `llm.debate_rounds`, a round's critiques (`phase: "critique"`) become `challenge` and `concede` turns whose `reply_to` is the proposal they answer; then each author's answers (`phase: "answer"`) follow: a revision is a `refine` turn with the new statement, `note` (the author's reason) and `answers` (ids of the challenges it answers, the first also in `reply_to`); a defence is a `defend` turn and a withdrawal a `concede` turn by the author, each replying to the challenge it answers; `added` hypotheses are new `propose` turns. A turn's `answers` are the only link from an answer to a challenge; a `refine` without them was not written in reply to a challenge. Every challenge carries `severity` (`fatal` or `caveat`) and, when fatal, `flaw`, `field` and for `already_established` `card_id`. Each critic's review (`phase: "review"`) follows: a `concede` turn when the answer resolves its objection, a `challenge` turn at the severity that still stands when it does not, both with `answers` naming the challenge and `reply_to` the answer they review; then its critique of the hypotheses added that round. Engine perspective names in the text (innovator, pragmatist, contrarian) are replaced by the agents' names. The judge's ranking from `debate_record.json` is a `test` turn by `pi` (id `judge`, `about` `Verdict`) |
+| `hypothesis.drafted`, `hypothesis.selected` | `hypotheses.json` (`falsify.zone` derived from the validated `prediction`; `tension_ids` lists the synthesis tensions the hypothesis settles; `from` the debate threads it is built from; `contested` and `caveats` the objections that still stand, each with `by` the agent, `about` the thread, `severity`, `flaw`, `text`; `kept_by_reviewer` when kept at the gate). A candidate kept at the hypotheses gate is sent as `hypothesis.drafted` and `hypothesis.selected` after `gate.resolved` |
+| `idea.set_aside` | each held-back candidate of `hypotheses.json`, with the objection that holds it back |
 | `hypothesis.checked` | `novelty_report.json` (`novelty` only; heuristic) |
 | `rule.checked` | rule 5, only after `hypotheses.json` passed the falsification contract |
 | `map.node`, `map.edge` | `semantic_graph.json`: `{node}` is an entity, `{edge}` a relation; steps `questions`, `foundation`, `reasoning` and `contribution` each send their entities, then the relations they complete, so an edge never arrives before both its ends |

@@ -104,9 +104,10 @@ stages:
       3. PHYSICALLY TESTABLE: evaluable with analytical cross-section formulas, a Python
          parameter scan or a recast of published experimental data.
       4. FALSIFIABLE: with a numerical threshold in natural units whose violation rejects it.
-      5. PHYSICALLY INTERESTING: at least one hypothesis challenges a common assumption or tests a
+      5. PHYSICALLY INTERESTING WHEN SUPPORTED: challenge a common assumption or test a
          counter-intuitive prediction (interference, accidental cancellation, non-thermal
-         production, velocity-dependent cross section).
+         production, velocity-dependent cross section) only when the cited cards give a reason
+         to; never invent one for its own sake.
       You synthesise several expert perspectives into a decisive final set and preserve genuine
       disagreement.
     guidance: |

@@ -14,18 +14,21 @@ research:
   min_topic_score: 5.0
   novelty_check: true
   max_shortlist: 20             # read the 20 best-scored papers; 0 keeps all that clear both bars
+  min_hypotheses: 3             # final set: every hypothesis that survives the debate, 3 to 6
+  max_hypotheses: 6
 
 llm:
-  # AWS Bedrock; credentials come from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION in .env
-  provider: bedrock
-  model: us.anthropic.claude-haiku-4-5-20251001-v1:0
-  region: ""                     # falls back to AWS_REGION
-  aws_profile: ""                # falls back to AWS_PROFILE / access keys in the environment
-  # OpenAI-compatible router (kept for switching back: uncomment these and comment out Bedrock)
-  # provider: openai_compatible
-  # base_url: https://9router.darrenak.id.vn/v1
-  # api_key_env: I2H_LLM_API_KEY
-  # model: scientrag-answer
+  # AWS Bedrock (kept for switching back: uncomment these and the AWS_* lines in .env,
+  # and comment out the router block below)
+  # provider: bedrock
+  # model: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  # region: ""                     # falls back to AWS_REGION
+  # aws_profile: ""                # falls back to AWS_PROFILE / access keys in the environment
+  # OpenAI-compatible router; key from I2H_LLM_API_KEY in .env
+  provider: openai_compatible
+  base_url: https://9router.oraltest.site/v1
+  api_key_env: I2H_LLM_API_KEY
+  model: cx/gpt-6-luna
   fallback_models: []
   timeout_sec: 120
   max_retries: 6                 # Bedrock per-minute quotas throttle bursts; back off

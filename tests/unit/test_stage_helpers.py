@@ -5,14 +5,25 @@ import asyncio
 import pytest
 
 from idea2hypothesis.pipeline.contracts import (
+    check_card_quotes,
     check_hypotheses,
     check_synthesis,
+    check_tensions,
     normalise_prediction,
+    normalise_quote,
     unsupported_numbers,
 )
 from idea2hypothesis.resources.hardware import HardwareProfile, detect_hardware
 from idea2hypothesis.stages import literature_screen as screen
 from idea2hypothesis.stages.base import gather_limited
+from idea2hypothesis.stages.hypothesis_debate import (
+    Candidate,
+    Objection,
+    check_answers,
+    check_critique,
+    check_review,
+)
+from idea2hypothesis.stages.hypothesis_gen import check_merge
 from idea2hypothesis.stages.literature_collect import expand_queries
 from idea2hypothesis.stages.search_strategy import sanitize_queries, shorten_query
 from idea2hypothesis.stages.synthesis import card_view
@@ -221,10 +232,179 @@ def test_synthesis_must_account_for_every_card_it_was_given() -> None:
     assert not check_synthesis(syn, {"SQ1"}, cards, every_card=True).errors
 
 
-def test_same_direction_portfolio_is_only_a_warning() -> None:
+def tension(**overrides: object) -> dict:
+    base = {
+        "id": "X1", "between": ["C1", "C2"], "text": "do retrieved passages help small models?",
+        "sides": [
+            {"claim": "retrieval raises accuracy", "card_ids": ["a"]},
+            {"claim": "retrieved context distracts small models", "card_ids": ["b"]},
+        ],
+    }  # fmt: skip
+    return {**base, **overrides}
+
+
+def test_a_tension_names_the_cards_on_each_of_its_two_sides() -> None:
+    cards, clusters = {"a", "b", "c"}, {"C1", "C2"}
+    assert check_tensions([tension()], cards, clusters).ok
+    assert check_tensions([], cards, clusters).ok  # cards that agree have no tension
+    one_side = [{"claim": "x", "card_ids": ["a"]}]
+    cases = {
+        "must look like X1": tension(id="T1"),
+        "unknown clusters ['C9']": tension(between=["C1", "C9"]),
+        "exactly two sides": tension(sides=one_side),
+        "side 2 needs a claim and at least one card": tension(
+            sides=[*one_side, {"claim": "y", "card_ids": []}]
+        ),
+        "side 2 references unknown cards ['z']": tension(
+            sides=[*one_side, {"claim": "y", "card_ids": ["z"]}]
+        ),
+        "cards ['a'] are on both sides": tension(
+            sides=[*one_side, {"claim": "y", "card_ids": ["a", "b"]}]
+        ),
+    }
+    for needle, bad in cases.items():
+        assert any(needle in e for e in check_tensions([bad], cards, clusters).errors), needle
+    twice = check_tensions([tension(), tension()], cards, clusters)
+    assert any("duplicate tension id X1" in e for e in twice.errors)
+
+
+def test_synthesis_checks_tensions_only_when_asked() -> None:
+    gap = {"text": "t", "sub_question_ids": ["SQ1"], "card_ids": ["a"]}
+    syn = {
+        "clusters": [{"id": "C1", "title": "x", "card_ids": ["a"]}],
+        "gaps": [{"id": "G1", **gap}, {"id": "G2", **gap}],
+        "tensions": [{"between": ["C1", "C2"], "text": "older runs have no ids"}],
+    }
+    assert check_synthesis(syn, {"SQ1"}, {"a", "b"}).ok
+    sided = check_synthesis(syn, {"SQ1"}, {"a", "b"}, sided_tensions=True)
+    assert any("must look like X1" in e for e in sided.errors)
+
+
+def test_when_the_cards_disagree_a_hypothesis_must_settle_a_tension() -> None:
+    gaps, refs = {"G1"}, {"card-p-1"}
+    plain = {"hypotheses": [hypothesis(1), hypothesis(2)]}
+    assert check_hypotheses(plain, gaps, refs).ok  # no tension, nothing to settle
+    unsettled = check_hypotheses(plain, gaps, refs, {"X1", "X2"})
+    assert any("at least one hypothesis must settle one" in e for e in unsettled.errors)
+    settles = {"hypotheses": [hypothesis(1, tension_ids=["X1"]), hypothesis(2, tension_ids=[])]}
+    assert check_hypotheses(settles, gaps, refs, {"X1", "X2"}).ok
+    made_up = {"hypotheses": [hypothesis(1, tension_ids=["X7"]), hypothesis(2)]}
+    result = check_hypotheses(made_up, gaps, refs, {"X1"})
+    assert any("tension_ids ['X7'] are not tensions" in e for e in result.errors)
+
+
+def test_every_challenge_gets_an_answer_that_does_what_it_says() -> None:
+    before = [{"statement": "retrieval cuts errors"}, {"statement": "abstention rises"}]
+    challenges = [
+        {"from": "pragmatist", "response": 1, "hypothesis": 1, "text": "confounded"},
+        {"from": "contrarian", "response": 2, "hypothesis": 2, "text": "cannot fail"},
+    ]
+    revised = [{"statement": "retrieval cuts unsupported answers"}, before[1]]
+
+    def answers(*items: tuple[int, str]) -> list[dict]:
+        return [{"challenge": n, "action": a, "text": "because"} for n, a in items]
+
+    good = {"answers": answers((1, "revise"), (2, "withdraw")), "hypotheses": revised,
+            "withdrawn": [2]}  # fmt: skip
+    assert check_answers(good, before, challenges).ok
+    cases = {
+        "challenges [2] have no answer": {"answers": answers((1, "revise")),
+                                          "hypotheses": revised},
+        "you revise hypothesis 1 but its statement is unchanged": {
+            "answers": answers((1, "revise"), (2, "defend")), "hypotheses": before},
+        "list 2 in withdrawn": {"answers": answers((1, "defend"), (2, "withdraw")),
+                                "hypotheses": before},
+        "answered more than once": {"answers": answers((1, "defend"), (1, "defend"), (2, "defend")),
+                                    "hypotheses": before},
+        "keep all 2 hypotheses": {"answers": answers((1, "defend"), (2, "defend")),
+                                  "hypotheses": before[:1]},
+        "action must be": {"answers": answers((1, "ignore"), (2, "defend")), "hypotheses": before},
+    }  # fmt: skip
+    for needle, bad in cases.items():
+        assert any(needle in e for e in check_answers(bad, before, challenges).errors), needle
+
+
+def test_a_fatal_challenge_names_its_flaw_and_where_it_is() -> None:
+    previous = {"innovator": [{"statement": "a"}], "pragmatist": [{"statement": "b"}]}
+    refs = {"card-p-1"}
+
+    def critique(**challenge: object) -> list[str]:
+        item = {
+            "to": "pragmatist",
+            "hypothesis": 1,
+            "stance": "challenge",
+            "text": "why",
+            **challenge,
+        }
+        data = {"responses": [item]}
+        return check_critique(data, previous, "innovator", {}, refs).errors
+
+    assert not critique(severity="caveat")
+    assert not critique(severity="fatal", flaw="unfalsifiable", field="falsification_criteria")
+    assert any("severity must be one of" in e for e in critique())
+    assert any("names its flaw" in e for e in critique(severity="fatal", field="statement"))
+    assert any(
+        "names the hypothesis field" in e for e in critique(severity="fatal", flaw="unsupported")
+    )
+    made_up = critique(severity="fatal", flaw="already_established", field="statement", card_id="x")
+    assert any("already_established needs card_id" in e for e in made_up)
+    assert not critique(
+        severity="fatal", flaw="already_established", field="statement", card_id="card-p-1"
+    )
+
+
+def test_a_review_judges_every_answer_and_never_raises_a_caveat() -> None:
+    caveat = Objection("innovator", 1, "contrarian", 1, "caveat", "small sample")
+    fatal = Objection("innovator", 2, "contrarian", 1, "fatal", "no card", flaw="unsupported")
+    items, refs = [caveat, fatal], {"card-p-1"}
+
+    def review(*reviews: dict, added: list | None = None, new: list | None = None) -> list[str]:
+        data = {"reviews": list(reviews), "added": added or []}
+        return check_review(data, items, new or [], refs).errors
+
+    ok = {"item": 1, "verdict": "resolved"}
+    assert not review(ok, {"item": 2, "verdict": "stands", "text": "still no card"})
+    assert not review(ok, {"item": 2, "verdict": "stands", "severity": "caveat", "text": "lower"})
+    assert any("items [2] have no review" in e for e in review(ok))
+    raised = review(
+        {"item": 1, "verdict": "stands", "severity": "fatal", "text": "x"}, ok | {"item": 2}
+    )
+    assert any("cannot be raised to fatal" in e for e in raised)
+    assert any("leaves unaddressed" in e for e in review(ok, {"item": 2, "verdict": "stands"}))
+    added = [{"item": 1, "stance": "challenge", "severity": "fatal", "text": "no card"}]
+    both = review(ok, ok | {"item": 2}, added=added, new=[("pragmatist", 4)])
+    assert any("added item 1: a fatal challenge names its flaw" in e for e in both)
+
+
+def test_the_final_set_uses_a_fatal_candidate_only_to_reach_the_minimum() -> None:
+    blocked = Objection("innovator", 1, "contrarian", 1, "fatal", "no card", flaw="unsupported")
+    candidates = {
+        "innovator-1": Candidate("innovator-1", "innovator", 1, {}, fatal=[blocked]),
+        "innovator-2": Candidate("innovator-2", "innovator", 2, {}),
+        "pragmatist-1": Candidate("pragmatist-1", "pragmatist", 1, {}),
+    }
+
+    def merge(*sources: list[str], minimum: int = 2) -> list[str]:
+        data = {"hypotheses": [{"id": f"H{i}", "from": s} for i, s in enumerate(sources, 1)]}
+        return check_merge(data, candidates, minimum, 6).errors
+
+    assert not merge(["innovator-2"], ["pragmatist-1"])
+    leaked = merge(["innovator-2"], ["pragmatist-1"], ["innovator-1"])
+    assert any("build on candidates whose fatal objection stands" in e for e in leaked)
+    # with a minimum of 3 only 2 cleared candidates exist, so the fatal one may fill the set
+    assert not merge(["innovator-2"], ["pragmatist-1"], ["innovator-1"], minimum=3)
+    assert any(
+        "from ['nobody-1'] are not candidates" in e for e in merge(["nobody-1"], ["innovator-2"])
+    )
+    assert any("write between 2 and 6" in e for e in merge(["innovator-2"]))
+    assert any("must list the candidate ids" in e for e in merge([], ["innovator-2"]))
+
+
+def test_hypotheses_may_all_predict_the_same_direction() -> None:
+    # The direction follows the evidence; a set that all points one way is not flagged.
     hyps = [hypothesis(i) for i in (1, 2, 3)]
     result = check_hypotheses({"hypotheses": hyps}, {"G1"}, {"card-p-1"})
-    assert result.ok and any("same direction" in w for w in result.warnings)
+    assert result.ok and not any("direction" in w for w in result.warnings)
 
 
 async def test_gather_limited_bounds_concurrency_and_keeps_order() -> None:
@@ -279,3 +459,43 @@ def test_hardware_nvidia_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: Result())
     profile = detect_hardware()
     assert (profile.gpu_type, profile.vram_mb, profile.tier) == ("cuda", 24564, "high")
+
+
+ABSTRACT = (
+    "Label smoothing (LS) enhances model calibration by introducing <i>entropy</i> regularization "
+    "during training. On CIFAR-10 it lowers the expected calibration error by 2.1 points."
+)
+
+
+def test_quotes_match_the_abstract_up_to_meaningless_differences() -> None:
+    assert normalise_quote("“Label  smoothing (LS) enhances…”") == "label smoothing (ls) enhances"
+    card = {
+        "problem": None, "method": "Entropy regularization during training", "data": None,
+        "metrics": None, "findings": "Lower ECE on CIFAR-10", "limitations": None,
+        "quotes": {
+            "method": ["introducing entropy regularization during training"],  # tags dropped
+            "findings": ["On CIFAR-10 it lowers the expected calibration error by 2.1 points."],
+        },
+    }  # fmt: skip
+    assert check_card_quotes(card, ABSTRACT).ok
+
+
+def test_paraphrased_short_or_missing_quotes_reject_the_card() -> None:
+    card = {
+        "problem": "Calibration", "method": "Entropy regularization", "data": None,
+        "metrics": None, "findings": "ECE drops by 3 points", "limitations": None,
+        "quotes": {
+            "method": ["improves calibration through entropy regularization"],
+            "findings": ["lowers the error"],
+            "data": ["On CIFAR-10 it lowers the expected calibration error"],
+        },
+    }  # fmt: skip
+    errors = check_card_quotes(card, ABSTRACT).errors
+    assert any("problem is filled but has no quote" in e for e in errors)
+    assert any("method quote" in e and "word for word" in e for e in errors)
+    assert any("findings quote" in e and "shorter than 4 words" in e for e in errors)
+    assert any("data is null but has quotes" in e for e in errors)
+    # A changed number is a different claim, not a meaningless difference.
+    card = {**card, "problem": None, "data": None, "method": None}
+    card["quotes"] = {"findings": ["lowers the expected calibration error by 3.1 points"]}
+    assert not check_card_quotes(card, ABSTRACT).ok

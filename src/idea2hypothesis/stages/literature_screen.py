@@ -13,8 +13,11 @@ from idea2hypothesis.stages.base import StageFailure, compact_json, gather_limit
 from idea2hypothesis.storage.runs import utc_now
 
 STAGE = 5
-MAX_ABSTRACT_CHARS = 800
-MAX_BATCH_CHARS = 30_000
+#: The reviewer reads the whole abstract: results and conclusions usually come last, so a cut
+#: would judge relevance on the opening alone. Only an abnormally long text is cut, and the
+#: decision says so.
+MAX_ABSTRACT_CHARS = 5000
+MAX_BATCH_CHARS = 80_000
 MAX_BATCH_PAPERS = 40
 MAX_MISSING_FRACTION = 0.2
 SCREEN_RULES = [
@@ -70,9 +73,13 @@ def make_batches(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     return batches
 
 
+def _abstract_cut(row: dict[str, Any]) -> bool:
+    return len(str(row.get("abstract") or "")) > MAX_ABSTRACT_CHARS
+
+
 def _prompt_view(row: dict[str, Any]) -> dict[str, Any]:
     abstract = str(row.get("abstract") or "")
-    if len(abstract) > MAX_ABSTRACT_CHARS:
+    if _abstract_cut(row):
         abstract = abstract[:MAX_ABSTRACT_CHARS] + "..."
     return {
         "paper_id": row["paper_id"],
@@ -184,7 +191,7 @@ def _decision(
     kept = screened["decision"] == "keep" and rel >= min_rel and qual >= min_qual
     if screened["decision"] == "keep" and not kept:
         reason += f" (below thresholds: relevance {rel} / quality {qual})"
-    return {
+    decision = {
         **base,
         "decision": "kept" if kept else "rejected",
         "relevance_score": rel,
@@ -192,6 +199,9 @@ def _decision(
         "reason": reason,
         "false_friend": screened.get("false_friend") or None,
     }
+    if _abstract_cut(row):
+        decision["abstract_cut_at"] = MAX_ABSTRACT_CHARS
+    return decision
 
 
 def _prefiltered(row: dict[str, Any]) -> dict[str, Any]:
@@ -294,6 +304,11 @@ async def run(ctx: StageContext) -> list[str]:
             "min_relevance": research.min_relevance,
             "min_quality": research.min_quality,
             "max_shortlist": cap,
+        },
+        # What the reviewer model was shown of each paper.
+        "reviewer_view": {
+            "fields": ["title", "year", "venue", "citation_count", "abstract"],
+            "abstract_max_chars": MAX_ABSTRACT_CHARS,
         },
         "summary": counts,
         "decisions": decisions,

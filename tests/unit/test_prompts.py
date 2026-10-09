@@ -26,14 +26,26 @@ STAGE_VARIABLES = {
         synthesis_json="{}",
         perspectives="p",
         judge_assessment="",
+        feedback="",
+        min_hypotheses="3",
+        max_hypotheses="6",
     ),
-    "debate_rebuttal": dict(
+    "debate_critique": dict(
         role="r", own_position="x", others="y", valid_refs="r", valid_gaps="g", synthesis_json="{}"
     ),
+    "debate_answer": dict(
+        role="r",
+        own_position="x",
+        challenges="y",
+        valid_refs="r",
+        valid_gaps="g",
+        synthesis_json="{}",
+    ),
+    "debate_review": dict(role="r", answered="a", added="n", valid_refs="r", synthesis_json="{}"),
     "debate_judge": dict(perspectives="p"),
 }
 ROLE_VARIABLES = dict(
-    topic="t", constraints="c", synthesis_json="{}", valid_refs="r", valid_gaps="g"
+    topic="t", constraints="c", feedback="", synthesis_json="{}", valid_refs="r", valid_gaps="g"
 )
 
 
@@ -102,9 +114,13 @@ def test_reliability_rules_are_in_the_prompts() -> None:
     assert "false_friend" in screen.user
     assert "staleness" in screen.system  # polysemy example
     hyp = loader.render("hypothesis_gen", **STAGE_VARIABLES["hypothesis_gen"])
-    for needle in ("FALSIFIABLE", "DIRECTIONALLY DIVERSE", "DISTINCT MECHANISMS", "TRACEABLE"):
+    for needle in ("FALSIFIABLE", "EVIDENCE-LED DIRECTION", "DISTINCT MECHANISMS", "TRACEABLE"):
         assert needle in hyp.user
     assert "falsification_criteria" in hyp.user and "estimand" in hyp.user
+    # The set's direction and surprise follow the evidence; nothing forces either.
+    assert "DIRECTIONALLY DIVERSE" not in hyp.user and "SURPRISING" not in hyp.system
+    card = loader.render("knowledge_extract", **STAGE_VARIABLES["knowledge_extract"])
+    assert "quotes" in card.user and "clearly implies" not in card.user
 
 
 def test_domain_overrides_replace_only_what_they_define() -> None:
@@ -167,3 +183,29 @@ def test_unknown_block_is_reported(tmp_path: Path) -> None:
     loader = PromptLoader("ml", override)
     with pytest.raises(PromptError, match="unknown prompt block"):
         loader.render("topic_evaluation", topic="t", goal_json="{}")
+
+
+def test_extracting_and_judging_prompts_run_at_temperature_zero() -> None:
+    loader = PromptLoader("ml")
+    for key in (
+        "topic_init", "topic_evaluation", "problem_decompose", "search_strategy",
+        "literature_screen", "knowledge_extract", "synthesis", "argument_map", "debate_judge",
+    ):  # fmt: skip
+        variables = STAGE_VARIABLES.get(key) or dict(
+            topic="t", claims_json="[]", hypotheses_json="[]"
+        )
+        assert loader.render(key, **variables).temperature == 0, key
+    # Proposing ideas keeps the configured temperature.
+    assert loader.render("hypothesis_gen", **STAGE_VARIABLES["hypothesis_gen"]).temperature is None
+    role = loader.role_names()[0]
+    assert loader.render_role(role, **ROLE_VARIABLES).temperature is None
+
+
+def test_a_prompt_temperature_outside_zero_to_one_is_rejected(tmp_path: Path) -> None:
+    override = tmp_path / "override.yaml"
+    override.write_text("stages:\n  synthesis:\n    temperature: 1.5\n", encoding="utf-8")
+    with pytest.raises(PromptError, match="temperature"):
+        PromptLoader("ml", override)
+    override.write_text("stages:\n  synthesis:\n    temperature: 0.2\n", encoding="utf-8")
+    loader = PromptLoader("ml", override)
+    assert loader.render("synthesis", **STAGE_VARIABLES["synthesis"]).temperature == 0.2

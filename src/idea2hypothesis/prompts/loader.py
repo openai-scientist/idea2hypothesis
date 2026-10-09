@@ -18,7 +18,7 @@ from typing import Any
 import yaml
 
 DOMAINS = ("ml", "hep", "biology")
-_ENTRY_FIELDS = {"system", "user", "json_mode", "max_tokens", "guidance"}
+_ENTRY_FIELDS = {"system", "user", "json_mode", "max_tokens", "temperature", "guidance"}
 _VAR_RE = re.compile(r"\{\{(\w+)\}\}")
 _INCLUDE_RE = re.compile(r"\{\{>\s*(\w+)\s*\}\}")
 _MAX_INCLUDE_DEPTH = 5
@@ -35,6 +35,8 @@ class RenderedPrompt:
     user: str
     json_mode: bool = False
     max_tokens: int | None = None
+    #: ``None`` uses the model's configured temperature (``llm.temperature``).
+    temperature: float | None = None
 
 
 def _read_package_yaml(*parts: str) -> dict[str, Any]:
@@ -56,6 +58,13 @@ def _validate_entry(key: str, entry: Any, origin: str) -> dict[str, Any]:
     unknown = set(entry) - _ENTRY_FIELDS
     if unknown:
         raise PromptError(f"{origin}: prompt {key!r} has unknown fields {sorted(unknown)}")
+    temperature = entry.get("temperature")
+    if temperature is not None and (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not 0 <= temperature <= 1
+    ):
+        raise PromptError(f"{origin}: prompt {key!r} temperature must be a number in [0, 1]")
     return dict(entry)
 
 
@@ -176,6 +185,7 @@ class PromptLoader:
             user=self._substitute(str(entry.get("user", "")), values, f"{where}.user").strip(),
             json_mode=bool(entry.get("json_mode", False)),
             max_tokens=entry.get("max_tokens"),
+            temperature=entry.get("temperature"),
         )
 
     def render(self, key: str, **variables: Any) -> RenderedPrompt:
@@ -189,7 +199,13 @@ class PromptLoader:
         except KeyError:
             raise PromptError(f"unknown hypothesis role {role!r}") from None
         rendered = self._render_entry(entry, variables, f"role:{role}")
-        return RenderedPrompt(rendered.system, rendered.user, True, entry.get("max_tokens", 6144))
+        return RenderedPrompt(
+            rendered.system,
+            rendered.user,
+            True,
+            entry.get("max_tokens", 6144),
+            rendered.temperature,
+        )
 
     # -- snapshot ---------------------------------------------------------
 

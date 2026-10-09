@@ -124,11 +124,12 @@ class BedrockLLM(ChainedLLM):
         if not conversation or conversation[0]["role"] != "user":
             conversation.insert(0, {"role": "user", "content": [{"text": "Continue"}]})
 
+        # Always sent: left out, Bedrock falls back to the model's default (1.0 for Claude), so a
+        # requested 0 would silently become the most random setting.
         inference: dict[str, Any] = {
-            "maxTokens": max(1, min(max_tokens or 4096, _MAX_OUTPUT_TOKENS))
+            "maxTokens": max(1, min(max_tokens or 4096, _MAX_OUTPUT_TOKENS)),
+            "temperature": min(max(temperature, 0.0), 1.0),
         }
-        if temperature > 0:
-            inference["temperature"] = min(max(temperature, 0.0), 1.0)
         request: dict[str, Any] = {
             "modelId": model,
             "messages": conversation,

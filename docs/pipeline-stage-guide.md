@@ -24,11 +24,24 @@ How the prompts work: `prompts/stages.yaml` holds one entry per stage with a sys
 template, shared blocks (`evidence_rules`, `json_rules`) and sub-prompts for the debate. Every
 stage prompt asks for a single JSON object. Domain files (`prompts.domain`: `ml` default, `hep`,
 `biology`) replace only the entries they define; `prompts.override_file` lets you replace more.
-Each run stores the rendered prompts and a content hash in `prompts.snapshot.json`. There is no
-runtime skill matcher: domain guidance is part of these prompt files.
+Each run stores the prompt templates and a content hash in `prompts.snapshot.json`, and every model
+call as it was sent and answered under `llm_calls/` (see below). There is no runtime skill
+matcher: domain guidance is part of these prompt files.
 
-Review modes decide where a human is asked: `copilot` gates after stage 5, `full` also after
-stage 2, `auto` and `light` never.
+Temperature: every prompt that extracts, scores or judges (stages 1 to 7, the argument map and the
+debate judge) sets `temperature: 0`, so the same input gives the same answer. Only the prompts that
+propose hypotheses (the perspectives, their answers in the debate and the final set) use
+`llm.temperature`; the debate critique and review, which judge, run at 0.
+
+Model call log: `runs/<id>/llm_calls/stage-NN/attempt-N/NNNN-<label>.json` holds one record per
+call, numbered in call order: the label, the repair round, `outcome` (`accepted`, `rejected` with
+the contract errors that sent it back, or `provider_error`), the request (temperature, max tokens,
+JSON mode, system prompt and every message) and the response (model id, raw text, tokens, cost,
+finish reason). It lives outside `stage-NN`, so rerunning a stage keeps the record of earlier
+tries.
+
+Review modes decide where a human is asked: `copilot` gates after stage 5 and after stage 8,
+`full` also after stage 2, `auto` and `light` never.
 
 ## Stage 1: TOPIC_INIT
 
@@ -58,7 +71,9 @@ rejected scope gate).
 * **MECE sub-questions.** At least three prioritised sub-questions that do not overlap but
   together cover the goal, each linked to the goal; ids are referenced by every later stage.
 * **Pre-flight topic evaluation.** A separate model call scores novelty, specificity and
-  feasibility from 0 to 10; the overall score is their mean. Below `research.min_topic_score`
+  feasibility from 0 to 10; the overall score is their mean. No literature has been read yet, so
+  `topic_evaluation.json` records `basis: "model judgement before any literature search"`: the
+  score is the model's prior, not a finding. Below `research.min_topic_score`
   (default 5.0) the files are written and the run ends `TOPIC_BELOW_THRESHOLD` with the model's
   suggestion for sharpening the topic.
 
@@ -103,6 +118,10 @@ Module `stages/literature_screen.py`. Input: `stage-04/candidates.jsonl`, goal a
 
 * **Cheap pre-filter.** Candidates with no keyword overlap with the topic or domains are marked
   `prefiltered` with a reason and no scores; if nothing overlaps, the model judges everything.
+* **Whole abstracts.** The reviewer model sees the title, year, venue, citation count and the
+  whole abstract (results and conclusions usually come last). Only an abstract over 5,000
+  characters is cut, and its decision records `abstract_cut_at`; `review.json` `reviewer_view`
+  states what the model was shown.
 * **Dual scoring.** The model, in batches, scores every remaining paper for relevance and
   quality (0 to 1) with a reason: domain match, method relevance, cross-domain rejection, recency
   preference, quality floor. Papers are kept at `research.min_relevance` and
@@ -133,9 +152,16 @@ Module `stages/knowledge_extract.py`. Input: `stage-05/shortlist.jsonl`.
   data, metrics, findings, limitations. Limitations matter most: they are the raw material for
   the research gaps in stage 7.
 * **Abstract level only.** Cards are labelled `evidence_scope: "abstract"`. Fields the abstract does not
-  support are `null`; nothing is filled in from the model's memory. Papers without an abstract
-  are listed under `skipped` in `knowledge_meta.json`. If no card can be made the stage fails
-  (`NO_CARDS`).
+  support are `null`; nothing is filled in from the model's memory. A limitation is recorded only
+  when the abstract states it, never inferred. Papers without an abstract are listed under
+  `skipped` in `knowledge_meta.json`. If no card can be made the stage fails (`NO_CARDS`).
+* **Quoted, checked word for word.** For every field it fills, the model copies 1 to 3 passages of
+  at least four words from the abstract into `quotes`. The contract compares each passage with the
+  abstract after removing only meaningless differences (Unicode forms, curly quotes and dashes,
+  HTML tags, letter case, white space, surrounding quote marks and ellipses); words and numbers
+  must match. A failing card is sent back with the reasons; if it still fails after the repair
+  rounds, the paper gets no card and is listed under `skipped` with the reason, so no card says
+  what its abstract does not.
 
 Output: `cards/<card_id>.json` and `.md`, `knowledge_meta.json`.
 
@@ -144,7 +170,11 @@ Output: `cards/<card_id>.json` and `.md`, `knowledge_meta.json`.
 Module `stages/synthesis.py`. Input: all cards, `stage-02/problem_tree.json`.
 
 * **Thematic clustering.** Cards are grouped into schools of approach instead of a paper-by-paper
-  list; the synthesis also records tensions between clusters.
+  list.
+* **Tensions with both sides on record.** Where cards disagree, the synthesis records a tension
+  (`X1`, ...) with its two sides: what each side finds and the cards behind it. A tension whose
+  side cites no card, or a card on both sides, fails the answer. When the cards agree there is no
+  tension.
 * **Evidence-linked gaps.** At least two research gaps, each tied to sub-questions and to the
   cards whose limitations reveal it. A gap that cites a card that does not exist fails the stage.
 * **No invented numbers.** Figures in the text that appear in no card are reported as warnings.
@@ -158,15 +188,46 @@ constraints and, with memory enabled, past anti-patterns.
 
 * **Perspectives.** Hypotheses are generated by several roles in parallel (`ml`: innovator,
   pragmatist, contrarian; `hep` and `biology` have their own roles in
-  `prompts/hypothesis_roles.yaml`). Their outputs are stored under `perspectives/`.
-* **Optional debate.** With `llm.debate_rounds > 0` each role rebuts the others for that many
-  rounds and a judge ranks the results. With `llm.reviewer` configured the judge is an
-  independent model; otherwise a warning says it is not independent.
+  `prompts/hypothesis_roles.yaml`), 3 or 4 each, so the debate starts from 9 to 12 candidates.
+  Their outputs are stored under `perspectives/`.
+* **Optional debate.** With `llm.debate_rounds > 0` each round has three phases (module
+  `stages/hypothesis_debate.py`):
+  * critique: every role challenges or concedes the others' hypotheses and says how serious each
+    challenge is: `fatal` only for one of four named flaws (not supported by the cards, cannot
+    fail, a test that cannot decide it, already shown by a card it must cite), else `caveat`;
+  * answer: every challenged role answers each challenge: it revises the hypothesis, defends it
+    citing the cards (and may argue a fatal challenge is only a caveat), or withdraws it, and may
+    add a replacement. No challenge may go unanswered, and an answer must do what it says;
+  * review: every critic judges the answers to its own challenges, `resolved` or `stands` (with
+    what the answer leaves unaddressed, at the same severity or lowered, never raised), and
+    critiques the added hypotheses.
+
+  An objection is settled by its critic's review, not by the author's claim to have fixed it, and
+  no one is asked to agree: a disagreement that stands is recorded. Withdrawn hypotheses leave the
+  debate, the judge's view and the final merge. A judge then ranks the positions, seeing what
+  still stands against each. With `llm.reviewer`
+  configured the judge is an independent model; otherwise the main model judges,
+  `debate_record.json` records `independent_judge: false` and a warning says so.
+* **The final set.** Every candidate that survived, merged where two say the same thing, between
+  `research.min_hypotheses` and `research.max_hypotheses` (default 3 to 6). A candidate with a
+  fatal objection standing is used only to reach the minimum and is then marked `contested`;
+  otherwise it is `held_back`, on record with its objection. Caveats that stand are added to the
+  hypothesis's limitations. Each hypothesis names its sources in `from`.
+* **Hypotheses gate** (`copilot` and `full`). The reviewer approves the set, drops hypotheses,
+  keeps a held-back candidate despite its objection (it stays marked contested, with the
+  reviewer's note), or rejects the set: stage 8 runs again with the note and the previous set in
+  the perspectives' prompts. The argument map is drawn from the set the reviewer approved.
+* **Settling tensions.** When the synthesis lists tensions, at least one hypothesis of the final
+  set must settle one: it predicts which side holds under which condition and names the tension
+  in `tension_ids`. Tensions no hypothesis settles are listed in `open_tensions`, so the record
+  shows what the set leaves untested.
 * **Falsifiability.** Every hypothesis states exposure, outcome, estimand, method, a prediction
   (`> 0`, `< 0` or `≠ 0`), a falsification criterion with a concrete failing observation, a
   mechanism (`rationale`), and why it is new (`novelty`), and points to a real gap and to
-  evidence (card or paper ids). Rationale and novelty text must differ between hypotheses. A
-  portfolio where every hypothesis predicts the same direction triggers a warning.
+  evidence (card or paper ids). Rationale and novelty text must differ between hypotheses.
+* **Evidence-led direction.** The predicted sign of each hypothesis follows its evidence. Nothing
+  asks the set to predict opposite directions or to include a counter-intuitive claim; a contrast
+  is proposed only when the cited cards give a reason for it.
 * **Novelty assessment** (`research.novelty_check`, default true). The hypotheses are compared
   with papers retrieved by new queries and the stage 4 pool; the result is a heuristic score and
   recommendation labelled as an assessment, not proof of novelty.

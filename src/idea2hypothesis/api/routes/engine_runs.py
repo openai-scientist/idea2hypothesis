@@ -96,7 +96,9 @@ async def submit_gate_answer(
     answer: GateAnswerRequest,
     service: RunService = Depends(get_service),
 ) -> OkResponse:
-    """``option_id``: ``approve``, ``drop`` (with ``dropped`` paper ids) or ``reject``."""
+    """``option_id``: ``approve``, ``drop`` or ``reject``. With ``drop``, ``dropped`` lists paper
+    ids (screening gate) or hypothesis ids (hypotheses gate), and ``kept`` lists held-back
+    hypotheses kept despite their objection, by thread id such as ``T2`` (hypotheses gate)."""
     run_id = service.resolve(popper_run_id)
     message = await service.answer_gate(run_id, gate_id, answer)
     return OkResponse(message=message)

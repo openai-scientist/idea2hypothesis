@@ -91,16 +91,20 @@ Failures end the run as `failed` with a code (see
 | --- | --- | --- |
 | `auto` | none | schema, evidence and empty-shortlist checks still apply |
 | `light` | none | `stage.completed` events carry `advisories` from quality checks |
-| `copilot` | screening gate after stage 5 | default |
-| `full` | scope gate after stage 2, screening gate after stage 5 | |
+| `copilot` | screening gate after stage 5, hypotheses gate after stage 8 | default |
+| `full` | scope gate after stage 2, screening gate after stage 5, hypotheses gate after stage 8 | |
 
-`gate.opened` carries the shortlist (screening) or goal, sub-questions and topic evaluation
-(scope). Approving a screening gate may list `dropped` paper ids, which are removed from
-`shortlist.jsonl`, `review.json` and `screen_meta.json` (dropping everything fails the run with
-`EMPTY_SHORTLIST`). Rejecting moves stages from the rollback point into `attempts/<n>/`, starts
-a new attempt and carries the reviewer note into the prompts of the redone stages: the screening
-gate rolls back to stage 3, the scope gate to stage 1. Gate ids look like `gate-s05-a1` (stage
-and attempt).
+`gate.opened` carries the shortlist (screening), the goal, sub-questions and topic evaluation
+(scope), or the hypotheses with their sources and standing objections, the held-back candidates
+and the open tensions (hypotheses). Approving a screening gate may list `dropped` paper ids, which
+are removed from `shortlist.jsonl`, `review.json` and `screen_meta.json` (dropping everything
+fails the run with `EMPTY_SHORTLIST`). Approving a hypotheses gate may list `dropped` hypothesis
+ids and `kept` held-back candidates; a kept one must pass the hypothesis contract on its own and
+joins the set marked contested. Rejecting moves stages from the rollback point into
+`attempts/<n>/`, starts a new attempt and carries the reviewer note into the prompts of the redone
+stages: the screening gate rolls back to stage 3, the scope gate to stage 1, the hypotheses gate
+to stage 8. An approved gate before the rollback point stays approved. Gate ids look like
+`gate-s05-a1` (stage and attempt).
 
 ## Storage layout
 
@@ -117,6 +121,9 @@ runs/
     stage-01/ ... stage-09/ artifacts plus manifest.json
     partial/stage-NN/attempt-<n>/  parts kept while a stage runs (scored batches, cards,
                             perspectives), reused when the stage is paused or retried
+    llm_calls/stage-NN/attempt-<n>/NNNN-<label>.json  every model call as sent and answered:
+                            request, raw response, model id, tokens, outcome and the
+                            contract errors that sent an answer back
     attempts/<n>/stage-NN/  outputs replaced by a rejected gate or an edited upstream artifact
 ```
 
@@ -151,8 +158,11 @@ hypothesize (8).
 * Screening pre-filters candidates by keyword overlap (listed in `review.json` as `prefiltered`
   with no scores) and scores the rest in batches with the model; papers the model did not
   score are excluded as `unscored`.
-* Stage 8 generates hypotheses per perspective role, optionally runs rebuttal rounds
-  (`llm.debate_rounds`) judged by the reviewer model, then merges into the final list. Without a
+* Stage 8 generates hypotheses per perspective role, optionally runs debate rounds
+  (`llm.debate_rounds`; each a critique of the others with a severity per challenge, every
+  challenged author's answer to each challenge, and every critic's review of those answers)
+  judged by the reviewer model, then merges the candidates that survived into the final set,
+  which must settle at least one synthesis tension when there are any. Without a
   reviewer model the judge is the main model and a warning says it is not independent.
 * The literature cache (`literature.cache`) stores earlier real responses under
   `storage.cache_root`; it is used only when a provider call fails and the entry is under 30 days

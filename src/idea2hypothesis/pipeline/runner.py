@@ -548,14 +548,26 @@ async def apply_gate_answer(
     attempt = int(record["attempt"])
     art = store.artifacts(run_id)
     checkpoint = store.read_checkpoint(run_id)
-    answer_doc = {"decision": answer.decision, "dropped": list(answer.dropped), "note": answer.note}
+    answer_doc = {
+        "decision": answer.decision,
+        "dropped": list(answer.dropped),
+        "kept": list(answer.kept),
+        "note": answer.note,
+    }
     resolved = {**gate, "status": "approved" if answer.decision == gates.APPROVE else "rejected",
                 "resolved_at": utc_now(), "answer": answer_doc}  # fmt: skip
     empty_after_drop = False
 
     if answer.decision == gates.APPROVE:
-        if answer.dropped and spec.kind != gates.SCREEN:
-            raise gates.GateError("papers can only be dropped at the screening gate")
+        if answer.dropped and spec.kind not in (gates.SCREEN, gates.HYPOTHESES):
+            raise gates.GateError("items can only be dropped at the screening or hypotheses gate")
+        if answer.kept and spec.kind != gates.HYPOTHESES:
+            raise gates.GateError("held-back hypotheses can only be kept at the hypotheses gate")
+        if spec.kind == gates.HYPOTHESES and (answer.dropped or answer.kept):
+            gates.apply_hypothesis_review(
+                art, run_id=run_id, attempt=attempt, dropped=answer.dropped,
+                kept=answer.kept, note=answer.note,
+            )  # fmt: skip
         if spec.kind == gates.SCREEN and answer.dropped:
             remaining = gates.apply_screen_drops(
                 art, run_id=run_id, attempt=attempt, dropped=answer.dropped, note=answer.note
@@ -567,6 +579,15 @@ async def apply_gate_answer(
         art.invalidate_from(int(spec.rollback_to), attempt)
         for n in range(int(spec.rollback_to), len(STAGE_SEQUENCE) + 1):
             checkpoint["stages"].pop(str(n), None)
+        # A gate before the rollback point stays answered: the stages it approved do not run again.
+        for earlier in gates.gates_for(record["review_mode"]):
+            if earlier.after_stage >= spec.rollback_to:
+                continue
+            state = checkpoint.get("gates", {}).get(gates.make_gate_id(earlier, attempt))
+            if state and state.get("status") == "approved":
+                carried = {**state, "gate_id": gates.make_gate_id(earlier, attempt + 1),
+                           "attempt": attempt + 1, "carried_from": state["gate_id"]}  # fmt: skip
+                checkpoint["gates"][carried["gate_id"]] = carried
         update = {
             "gate": resolved,
             "attempt": attempt + 1,
@@ -595,6 +616,15 @@ def _rejection_feedback(spec: gates.GateSpec, art: Any, note: str) -> str:
     lines = ["Reviewer feedback on the previous attempt (address it in this attempt):"]
     if note.strip():
         lines.append(f"- {note.strip()}")
+    if spec.kind == gates.HYPOTHESES:
+        try:
+            doc = art.read_json(8, "hypotheses.json")
+            lines.append(
+                "- Previous hypotheses (write a better set, not the same one): "
+                + "; ".join(f"{h['id']}: {h['statement']}" for h in doc["hypotheses"])
+            )
+        except (OSError, ValueError, KeyError):
+            pass
     if spec.kind == gates.SCREEN:
         try:
             summary = art.read_json(5, "review.json")["summary"]

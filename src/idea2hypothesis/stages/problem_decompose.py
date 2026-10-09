@@ -73,6 +73,8 @@ async def run(ctx: StageContext) -> list[str]:
         "threshold": ctx.config.research.min_topic_score,
         "reasons": {k: str(evaluation["reasons"][k]).strip() for k in dims},
         "suggestion": str(evaluation["suggestion"]).strip(),
+        # No paper has been retrieved yet: the scores are the model's prior, not a finding.
+        "basis": "model judgement before any literature search",
     }
 
     ctx.artifacts.write_json(STAGE, "problem_tree.json", tree)

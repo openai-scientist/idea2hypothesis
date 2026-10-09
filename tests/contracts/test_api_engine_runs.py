@@ -116,14 +116,22 @@ async def test_copilot_gate_flow_runs_to_completion(tmp_path: Path) -> None:
         response = await _answer(h, run_id)
         assert response.status_code == 200
         assert response.json() == {"status": "ok", "message": "Gate answer accepted"}
+        # then the hypotheses gate, with the set and what each hypothesis is built from
+        assert (await h.state(run_id))["status"] == "awaiting_review"
+        events = await h.events(run_id)
+        gate_id = _gate_id(events)
+        second = [e for e in events if e["type"] == "gate.opened"][-1]["payload"]
+        assert second["kind"] == "hypotheses" and second["stage_key"] == "r1-hypothesize"
+        assert second["droppable"] == ["H1", "H2", "H3"]
+        assert {o["id"] for o in second["options"]} == {"approve", "drop", "reject"}
+        await _answer(h, run_id)
         assert (await h.state(run_id))["status"] == "completed"
         events = await h.events(run_id)
         types = [e["type"] for e in events]
-        assert "gate.resolved" in types and types[-1] == "run.completed"
+        assert types.count("gate.resolved") == 2 and types[-1] == "run.completed"
         assert types.count("card.extracted") == 9
 
         # answering again is idempotent for the same option and a conflict otherwise
-        gate_id = _gate_id(events)
         same = await h.client.post(f"/runs/{run_id}/gates/{gate_id}", json={"option_id": "approve"})
         assert same.status_code == 200 and "already" in same.json()["message"]
         other = await h.client.post(f"/runs/{run_id}/gates/{gate_id}", json={"option_id": "reject"})
@@ -144,8 +152,56 @@ async def test_gate_drop_excludes_papers_from_later_stages(tmp_path: Path) -> No
         assert resolved["payload"]["answer"] == {
             "option_id": "drop",
             "dropped": [victim],
+            "kept": [],
             "note": "not relevant",
         }
+
+
+async def test_the_hypotheses_gate_keeps_a_held_back_candidate_by_its_thread(
+    tmp_path: Path,
+) -> None:
+    def blocking_review(info: Any) -> dict[str, Any]:
+        data = FixtureLLM()._default_debate_review(info)
+        if "as the pragmatist perspective" in info.system:
+            data["reviews"] = [
+                {"item": r["item"], "verdict": "stands", "severity": "fatal",
+                 "flaw": "unsupported", "text": "still no card"}
+                for r in data["reviews"]
+            ]  # fmt: skip
+        return data
+
+    llm = FixtureLLM(overrides={"debate_review": blocking_review})
+    async with harness(tmp_path, llm=llm, llm_settings={"debate_rounds": 1}) as h:
+        run_id = (await h.start("p-1")).json()["popper_run_id"]
+        await h.settle()
+        await _answer(h, run_id)
+        events = await h.events(run_id)
+        gate = [e for e in events if e["type"] == "gate.opened"][-1]["payload"]
+        assert gate["kind"] == "hypotheses" and gate["keepable"] == ["T1"]
+        aside = next(e["payload"] for e in events if e["type"] == "idea.set_aside")
+        assert aside["idea_id"] == "T1" and "still no card" in aside["reason"]
+        unknown = await h.client.post(
+            f"/runs/{run_id}/gates/{gate['gate_id']}", json={"option_id": "drop", "kept": ["M3"]}
+        )
+        assert unknown.status_code == 422
+        # in the fixture the held-back candidate repeats H3's wording, so H3 makes room for it
+        response = await _answer(
+            h, run_id, "drop", dropped=["H3"], kept=["T1"], note="test it anyway"
+        )
+        assert response.status_code == 200, response.text
+        assert (await h.state(run_id))["status"] == "completed"
+        events = await h.events(run_id)
+    resolved = [e for e in events if e["type"] == "gate.resolved"][-1]["payload"]
+    assert resolved["answer"]["kept"] == ["T1"]
+    assert resolved["summary"] == (
+        "Approved the hypotheses without 1 hypothesis and keeping T1 despite the objection."
+    )
+    kept = [e["payload"]["hypothesis"] for e in events if e["type"] == "hypothesis.drafted"][-1]
+    assert kept["id"] == "H4" and kept["from"] == ["T1"]
+    assert (
+        kept["kept_by_reviewer"] == "test it anyway"
+        and kept["contested"][0]["by"] == "methodologist"
+    )
 
 
 async def test_gate_errors(tmp_path: Path) -> None:
@@ -170,7 +226,7 @@ async def test_full_mode_has_a_scope_gate_before_the_screen_gate(tmp_path: Path)
         events = await h.events(run_id)
         scope = next(e for e in events if e["type"] == "gate.opened")
         assert scope["payload"]["kind"] == "scope"
-        assert (scope["payload"]["stop_index"], scope["payload"]["stop_total"]) == (1, 2)
+        assert (scope["payload"]["stop_index"], scope["payload"]["stop_total"]) == (1, 3)
         assert not any(e["type"] == "stage.started" and e["stage_key"] == "search" for e in events)
         plan = next(e for e in events if e["type"] == "run.plan")["payload"]["stages"]
         assert [s["has_gate"] for s in plan if s["key"] in ("scope", "screen")] == [True, True]
@@ -183,6 +239,8 @@ async def test_full_mode_has_a_scope_gate_before_the_screen_gate(tmp_path: Path)
         assert any(e["type"] == "scope.approved" for e in events)
         assert any(e["type"] == "stage.completed" and e["stage_key"] == "scope" for e in events)
 
+        await _answer(h, run_id)
+        assert (await h.state(run_id))["status"] == "awaiting_review"  # the hypotheses gate
         await _answer(h, run_id)
         assert (await h.state(run_id))["status"] == "completed"
 

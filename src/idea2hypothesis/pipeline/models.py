@@ -104,11 +104,14 @@ class RunRequest:
 
 @dataclass(frozen=True)
 class GateAnswer:
-    """Reviewer decision: ``approve`` or ``reject``; ``dropped`` lists paper ids to exclude."""
+    """Reviewer decision: ``approve`` or ``reject``. ``dropped`` lists ids to exclude (papers at
+    the screening gate, hypotheses at the hypotheses gate); ``kept`` lists held-back hypothesis
+    candidates the reviewer keeps despite a standing objection (hypotheses gate only)."""
 
     decision: str
     dropped: tuple[str, ...] = ()
     note: str = ""
+    kept: tuple[str, ...] = ()
 
 
 @dataclass

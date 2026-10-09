@@ -62,7 +62,9 @@ def test_json_artifacts_carry_a_schema_version(art: ArtifactStore) -> None:
         (7, "synthesis.json"), (8, "hypotheses.json"), (9, "argument_map.json"),
         (9, "semantic_graph.json"), (9, "research_canvas.json"),
     ]:  # fmt: skip
-        assert art.read_json(stage, name)["schema_version"] == 1, name
+        # syntheses from schema 2 on give each tension an id and two sides of cards
+        expected = 2 if name == "synthesis.json" else 1
+        assert art.read_json(stage, name)["schema_version"] == expected, name
     for stage in range(1, 10):
         assert art.read_manifest(stage)["schema_version"] == 1
 
@@ -293,3 +295,28 @@ def test_stage9_canvas_holds_nine_pieces_and_findings_wait(art: ArtifactStore) -
     assert next(p for p in pieces if p["id"] == "findings")["status"] == "pending"
     edit_json(art, 9, "research_canvas.json", lambda d: d["pieces"].pop())
     assert any("nine pieces" in e for e in validate_stage(Stage.ARGUMENT_MAP, art).errors)
+
+
+def test_stage6_cards_quote_their_abstract_word_for_word(art: ArtifactStore) -> None:
+    path = sorted((art.stage_dir(6) / "cards").glob("*.json"))[0]
+    card = json.loads(path.read_text(encoding="utf-8"))
+    assert card["schema_version"] == 2 and card["quotes"]["findings"]
+    assert validate_stage(Stage.KNOWLEDGE_EXTRACT, art).ok
+
+    card["quotes"]["findings"] = ["report large gains on every outcome measured"]
+    path.write_text(json.dumps(card), encoding="utf-8")
+    errors = validate_stage(Stage.KNOWLEDGE_EXTRACT, art).errors
+    assert any("findings quote" in e and "word for word" in e for e in errors)
+
+    del card["quotes"]
+    path.write_text(json.dumps(card), encoding="utf-8")
+    assert any("'quotes'" in e for e in validate_stage(Stage.KNOWLEDGE_EXTRACT, art).errors)
+
+
+def test_stage6_cards_written_before_quotes_still_validate(art: ArtifactStore) -> None:
+    path = sorted((art.stage_dir(6) / "cards").glob("*.json"))[0]
+    card = json.loads(path.read_text(encoding="utf-8"))
+    card["schema_version"] = 1
+    del card["quotes"]
+    path.write_text(json.dumps(card), encoding="utf-8")
+    assert validate_stage(Stage.KNOWLEDGE_EXTRACT, art).ok

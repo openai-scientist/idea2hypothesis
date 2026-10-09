@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +11,7 @@ from idea2hypothesis.storage.artifacts import ArtifactStore
 
 SCREEN = "screen"
 SCOPE = "scope"
+HYPOTHESES = "hypotheses"
 APPROVE = "approve"
 REJECT = "reject"
 
@@ -32,12 +34,17 @@ SCREEN_GATE = GateSpec(
 SCOPE_GATE = GateSpec(
     SCOPE, Stage.PROBLEM_DECOMPOSE, Stage.TOPIC_INIT, (Stage.TOPIC_INIT, Stage.PROBLEM_DECOMPOSE)
 )
+#: The reviewer decides on the final set before it is mapped: drop hypotheses, keep a held-back
+#: one despite its objection, or send the set back to be written again.
+HYPOTHESES_GATE = GateSpec(
+    HYPOTHESES, Stage.HYPOTHESIS_GEN, Stage.HYPOTHESIS_GEN, (Stage.HYPOTHESIS_GEN,)
+)
 
 _MODE_GATES: dict[str, tuple[GateSpec, ...]] = {
     "auto": (),
     "light": (),
-    "copilot": (SCREEN_GATE,),
-    "full": (SCOPE_GATE, SCREEN_GATE),
+    "copilot": (SCREEN_GATE, HYPOTHESES_GATE),
+    "full": (SCOPE_GATE, SCREEN_GATE, HYPOTHESES_GATE),
 }
 
 
@@ -50,7 +57,7 @@ def gate_after(mode: str, stage: Stage) -> GateSpec | None:
 
 
 def gate_by_kind(kind: str) -> GateSpec:
-    return {SCREEN: SCREEN_GATE, SCOPE: SCOPE_GATE}[kind]
+    return {SCREEN: SCREEN_GATE, SCOPE: SCOPE_GATE, HYPOTHESES: HYPOTHESES_GATE}[kind]
 
 
 def make_gate_id(spec: GateSpec, attempt: int) -> str:
@@ -72,6 +79,21 @@ def gate_payload(spec: GateSpec, artifacts: ArtifactStore) -> dict[str, Any]:
                 for r in shortlist
             ],
             "summary": review.get("summary", {}),
+        }  # fmt: skip
+    if spec.kind == HYPOTHESES:
+        doc = artifacts.read_json(8, "hypotheses.json")
+        return {
+            "hypotheses": [
+                {"id": h["id"], "statement": h["statement"], "from": h.get("from") or [],
+                 "contested": h.get("contested") or [], "tension_ids": h.get("tension_ids") or []}
+                for h in doc["hypotheses"]
+            ],
+            "held_back": [
+                {"candidate": b["candidate"], "role": b["role"], "number": b["number"],
+                 "statement": b["hypothesis"].get("statement", ""), "objections": b["objections"]}
+                for b in doc.get("held_back") or []
+            ],
+            "open_tensions": doc.get("open_tensions") or [],
         }  # fmt: skip
     goal = artifacts.read_json(1, "goal.json")
     tree = artifacts.read_json(2, "problem_tree.json")
@@ -108,6 +130,80 @@ def apply_screen_drops(
     meta["dropped_by_reviewer"] = len(dropped)
     artifacts.write_json(5, "screen_meta.json", meta)
     artifacts.write_manifest(5, run_id=run_id, attempt=attempt)
+    return len(remaining)
+
+
+def apply_hypothesis_review(
+    artifacts: ArtifactStore,
+    *,
+    run_id: str,
+    attempt: int,
+    dropped: tuple[str, ...],
+    kept: tuple[str, ...],
+    note: str,
+) -> int:
+    """Apply the reviewer's changes to the final set; returns its new size.
+
+    Dropped hypotheses leave the set. A kept held-back candidate joins it under a new id, still
+    marked contested with its objection, and must pass the hypothesis contract on its own.
+    """
+    from idea2hypothesis.pipeline.contracts import (  # noqa: PLC0415 - avoids an import cycle
+        check_hypotheses,
+        hypothesis_reference_sets,
+        tension_ids,
+    )
+    from idea2hypothesis.stages.hypothesis_gen import (  # noqa: PLC0415
+        render_hypotheses_markdown,
+    )
+
+    doc = artifacts.read_json(8, "hypotheses.json")
+    ids = {str(h["id"]) for h in doc["hypotheses"]}
+    unknown = sorted(set(dropped) - ids)
+    if unknown:
+        raise GateError(f"dropped hypotheses are not in the set: {unknown}")
+    held = {str(b["candidate"]): b for b in doc.get("held_back") or []}
+    unknown = sorted(set(kept) - set(held))
+    if unknown:
+        raise GateError(f"kept candidates are not held back: {unknown}")
+    remaining = [h for h in doc["hypotheses"] if str(h["id"]) not in set(dropped)]
+    synthesis = artifacts.read_json(7, "synthesis.json")
+    cards = [
+        artifacts.read_json(6, n)
+        for n in artifacts.list_files(6)
+        if n.startswith("cards/") and n.endswith(".json")
+    ]
+    gaps, refs = hypothesis_reference_sets(synthesis, cards)
+    tensions = tension_ids(synthesis)
+    numbers = [int(str(h["id"])[1:]) for h in doc["hypotheses"] if str(h["id"])[1:].isdigit()]
+    next_number = max(numbers, default=0) + 1
+    restored = []
+    for cid in kept:
+        entry = held.pop(cid)
+        h = {**entry["hypothesis"], "id": f"H{next_number}"}
+        next_number += 1
+        h["from"] = [cid]
+        h["contested"] = entry["objections"]
+        h["caveats"] = []
+        h["tension_ids"] = [t for t in h.get("tension_ids") or [] if t in tensions]
+        h["kept_by_reviewer"] = note.strip() or "Kept by the reviewer despite the objection."
+        problems = check_hypotheses({"hypotheses": [h, *remaining]}, gaps, refs, tensions).errors
+        # Only what is wrong with the kept hypothesis itself (or that it repeats another).
+        mine = [p for p in problems if re.search(rf"\b{h['id']}\b", p)]
+        if mine:
+            raise GateError(f"{cid} cannot join the set as written: {'; '.join(mine[:3])}")
+        restored.append(h)
+    remaining += restored
+    if not remaining:
+        raise GateError("keep at least one hypothesis")
+    settled = {t for h in remaining for t in h.get("tension_ids") or []}
+    doc["hypotheses"] = remaining
+    doc["held_back"] = list(held.values())
+    doc["open_tensions"] = sorted(tensions - settled)
+    doc["human_review"] = {"decision": APPROVE, "dropped": list(dropped), "kept": list(kept),
+                           "note": note}  # fmt: skip
+    artifacts.write_json(8, "hypotheses.json", doc)
+    artifacts.write_text(8, "hypotheses.md", render_hypotheses_markdown(doc))
+    artifacts.write_manifest(8, run_id=run_id, attempt=attempt)
     return len(remaining)
 
 

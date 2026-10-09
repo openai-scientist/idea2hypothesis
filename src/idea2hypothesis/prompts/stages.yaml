@@ -5,7 +5,9 @@
 #   {{> block}}   include of an entry from `blocks`
 # JSON examples use single braces and are left untouched.
 # Domain files (domains/*.yaml) and the optional override file may replace any entry
-# field-by-field (system, user, json_mode, max_tokens) or any block.
+# field-by-field (system, user, json_mode, max_tokens, temperature) or any block.
+# `temperature: 0` is set on every prompt that extracts, scores or judges, so the same input
+# gives the same answer; prompts that propose ideas use the configured llm.temperature.
 version: 1
 
 blocks:
@@ -41,8 +43,20 @@ blocks:
       "limitations": ["known boundary conditions or weaknesses"],
       "rationale": "the causal or physical mechanism that makes the claim plausible (unique to this hypothesis)",
       "novelty": "why this specific claim is not already established, citing the gap (unique to this hypothesis)",
-      "risk": "low | medium | high"
+      "risk": "low | medium | high",
+      "tension_ids": ["X1  (ids of synthesis tensions this hypothesis settles; [] when none)"]
     }
+
+  objection_rules: |
+    HOW SERIOUS AN OBJECTION IS (pick one for every challenge):
+    - "fatal": the hypothesis cannot go forward as written. Name the flaw, exactly one of
+      "unsupported" (a claim the cited cards do not support), "unfalsifiable" (no result could
+      show it wrong), "undecidable_test" (the proposed test cannot tell the claim from its
+      alternative), "already_established" (a card already shows it; give that card's id in
+      "card_id"). Name the hypothesis field that holds the flaw in "field" (statement,
+      falsification_criteria, method, conditions, evidence_refs, ...).
+    - "caveat": a limit or risk worth recording; the hypothesis can still be tested as written.
+    Call an objection fatal only when it is one of the four flaws; everything else is a caveat.
 
   hypothesis_quality: |
     QUALITY RULES FOR HYPOTHESES (all mandatory):
@@ -50,18 +64,26 @@ blocks:
        that cannot fail under any outcome is not a hypothesis.
     2. OPERATIONALISED: name exposure, outcome (with metric and unit), estimand and method. Generic
        entries such as "sleep", "score", "test" are not acceptable.
-    3. DIRECTIONALLY DIVERSE: with three or more hypotheses, do not predict the same sign for all
-       of them; include costs, trade-offs or interactions, not only expected gains.
+    3. EVIDENCE-LED DIRECTION: the predicted sign of each hypothesis follows from its cited
+       evidence and mechanism. Never flip or vary a sign to make the set look diverse; when the
+       evidence points the same way for every hypothesis, predict that way. Consider costs,
+       trade-offs or interactions only where the evidence suggests them.
     4. DISTINCT MECHANISMS: every `rationale` and every `novelty` argument must differ in
        substance from the others. Do not reuse template sentences.
     5. TRACEABLE: each hypothesis must reference one gap id and evidence references that exist in
        the provided material (sub-question -> paper -> limitation -> gap -> hypothesis).
     6. NOT TRIVIAL: do not restate well-known results or textbook facts.
+    7. SETTLE TENSIONS: where the synthesis lists tensions (cards that disagree), a hypothesis
+       that settles one is the most informative kind: it predicts which side holds under which
+       condition, so either result explains the disagreement. Put the condition in `conditions`
+       and the tension id in `tension_ids`. Name a tension only when the test would actually
+       decide between its two sides.
 
 stages:
   topic_init:
     json_mode: true
     max_tokens: 4096
+    temperature: 0
     system: |
       You are a senior Principal Investigator and Area Chair. You turn a proposed topic into a
       rigorous research goal, and you reject topics that are not researchable.
@@ -98,7 +120,9 @@ stages:
       - scope: boundary conditions, focused enough for a single paper.
       - smart_goal: Specific, Measurable, Achievable, Relevant, Time-bound.
       - constraints: compute, tools and data access that bound the work.
-      - success_criteria: measurable results that would make the work publishable.
+      - success_criteria: measurable outcomes that would answer the objective. Do not fix
+        significance levels, effect sizes or dataset counts unless the topic states them; those
+        are decided once the literature is read.
       - benchmark: the dataset or benchmark used for evaluation (name, source, typical metrics), or
         null when none exists. Do NOT state model names or performance numbers; they are verified
         during literature retrieval.
@@ -123,6 +147,7 @@ stages:
   topic_evaluation:
     json_mode: true
     max_tokens: 1024
+    temperature: 0
     system: |
       You are a strict senior researcher evaluating the quality of a research topic for a top
       venue. Score honestly; weak topics must receive low scores.
@@ -151,6 +176,7 @@ stages:
   problem_decompose:
     json_mode: true
     max_tokens: 4096
+    temperature: 0
     system: |
       You are a senior research strategist who decomposes a research goal into prioritised,
       answerable sub-questions.
@@ -178,6 +204,7 @@ stages:
   search_strategy:
     json_mode: true
     max_tokens: 4096
+    temperature: 0
     system: |
       You design literature retrieval strategies. Queries are sent to OpenAlex, Semantic Scholar
       and arXiv, so they must be short keyword queries rather than sentences.
@@ -213,6 +240,7 @@ stages:
   literature_screen:
     json_mode: true
     max_tokens: 8192
+    temperature: 0
     system: |
       You are a strict domain-aware reviewer with zero tolerance for cross-domain false
       positives. Reject papers from unrelated fields even when they share superficial keyword
@@ -271,10 +299,12 @@ stages:
 
   knowledge_extract:
     json_mode: true
-    max_tokens: 2048
+    max_tokens: 3072
+    temperature: 0
     system: |
       You extract high-signal evidence cards from a single paper. You see only the title,
-      metadata and abstract, so you must not claim anything that is not stated there.
+      metadata and abstract, so you must not claim anything that is not stated there. Every
+      field you fill is backed by words copied exactly from the abstract.
     user: |
       Extract a structured knowledge card for this paper in the context of the research topic.
 
@@ -287,12 +317,20 @@ stages:
       - data: datasets, cohorts or experimental inputs named in the abstract.
       - metrics: the evaluation measures named in the abstract.
       - findings: the key result stated in the abstract (numbers only if the abstract has them).
-      - limitations: limitations the abstract states or clearly implies.
+      - limitations: limitations the abstract itself states. Do not infer a limitation the
+        abstract does not state; a limitation of earlier work is not a limitation of this paper.
       - Any field the abstract does not support MUST be null. Do not fill it with generic text.
+
+      QUOTES (strict): for every field you fill, "quotes" lists 1-3 passages copied character
+      for character from the abstract that support it. Copy a contiguous run of words (at least
+      four words), do not paraphrase, shorten inside, translate or join passages. A field you
+      cannot back with a quote must be null and has no quotes. The quotes are checked against the
+      abstract; a quote that is not in it rejects the card.
 
       {{> json_rules}}
       Schema:
-      {"problem": "...", "method": "...", "data": null, "metrics": null, "findings": "...", "limitations": null}
+      {"problem": "...", "method": "...", "data": null, "metrics": null, "findings": "...", "limitations": null,
+       "quotes": {"problem": ["exact words from the abstract"], "method": ["..."], "findings": ["..."]}}
 
       Paper:
       {{paper_json}}
@@ -300,6 +338,7 @@ stages:
   synthesis:
     json_mode: true
     max_tokens: 8192
+    temperature: 0
     system: |
       You are a synthesis specialist for literature reviews. You cluster evidence cards into
       schools of thought and identify research gaps that the cards actually support.
@@ -319,6 +358,11 @@ stages:
         generic wish.
       - Do NOT introduce numbers, effect sizes or counts that are not in the cards.
       - "prioritized_opportunities" turns gaps into concrete research directions.
+      - A tension is a point where cards disagree: their findings point different ways, or one
+        finding holds only where another does not. Give each tension an id (X1, X2, ...), the
+        clusters it lies between, and its two sides: each side states what its cards find and
+        lists those cards (at least one per side, no card on both sides). Report only
+        disagreements the cards show; when the cards agree, "tensions" is an empty list.
 
       Topic: {{topic}}
       {{domain_guidance}}
@@ -333,7 +377,7 @@ stages:
       {
         "overview": "3-sentence synthesis",
         "clusters": [{"id": "C1", "title": "...", "claim": "...", "card_ids": ["card-p-..."]}],
-        "tensions": [{"between": ["C1", "C2"], "text": "..."}],
+        "tensions": [{"id": "X1", "between": ["C1", "C2"], "text": "what is in dispute and what the cards leave open", "sides": [{"claim": "what these cards find", "card_ids": ["card-p-..."]}, {"claim": "what these cards find", "card_ids": ["card-p-..."]}]}],
         "gaps": [{"id": "G1", "text": "...", "sub_question_ids": ["SQ1"], "card_ids": ["card-p-..."], "why_prioritized": "...", "priority": 1}],
         "prioritized_opportunities": [{"gap_id": "G1", "direction": "..."}],
         "set_aside": [{"id": "A1", "card_ids": ["card-p-..."], "reason": "..."}]
@@ -349,13 +393,22 @@ stages:
       2. GAP-FILLING: targeted at a specific gap identified in the synthesis.
       3. FEASIBLE: testable within the stated research constraints.
       4. FALSIFIABLE: with clear failure conditions that would reject the hypothesis.
-      5. SURPRISING: at least one hypothesis should challenge conventional wisdom or test a
-         counter-intuitive prediction.
+      5. EVIDENCE-LED: a hypothesis challenges conventional wisdom only when the cited cards give
+         a reason to; never invent a counter-intuitive claim for its own sake.
       You synthesise several expert perspectives into a decisive final set; the best synthesis
       takes the strongest element of each view rather than a compromise, and it preserves genuine
       disagreement.
     user: |
-      Write the final set of 2-4 hypotheses.
+      Write the final set of hypotheses: every candidate that survived the debate, merged where
+      two say the same thing, between {{min_hypotheses}} and {{max_hypotheses}} hypotheses.
+      Each final hypothesis lists in "from" the candidate ids it is built from (the ids after ###
+      below). Build only from candidates marked CLEARED or CAVEATS. A candidate marked FATAL has
+      an objection that stands; use one only when fewer than {{min_hypotheses}} final hypotheses
+      can be built otherwise, and it is then reported as contested with its objection.
+      When the synthesis lists tensions, at least one hypothesis of the set settles one of them
+      (rule 7). Tensions the set leaves open are reported as open; do not attach a tension to a
+      hypothesis that would not decide it.
+      {{feedback}}
 
       Topic: {{topic}}
       Research constraints: {{constraints}}
@@ -374,16 +427,17 @@ stages:
       Synthesis:
       {{synthesis_json}}
 
-      Perspectives:
+      Candidates from the debate, each with its standing:
       {{perspectives}}
       {{judge_assessment}}
 
       {{> json_rules}}
-      Return {"hypotheses": [ ... ], "disagreements": ["unresolved disagreement between perspectives", ...]}
+      Return {"hypotheses": [ {... every schema field ..., "from": ["innovator-1"]} ], "disagreements": ["unresolved disagreement between perspectives", ...]}
 
   argument_map:
     json_mode: true
     max_tokens: 8192
+    temperature: 0
     system: |
       You review the argument behind a set of research hypotheses. You judge how each piece of
       evidence bears on the claim it was grouped under, and which claims in the literature give
@@ -421,15 +475,18 @@ stages:
       }
 
 sub_prompts:
-  debate_rebuttal:
+  debate_critique:
     json_mode: true
-    max_tokens: 6144
+    max_tokens: 4096
+    temperature: 0
     system: |
-      You are participating in a structured research debate as the {{role}} perspective. You have
-      seen the other perspectives. Push back on their weak points, defend or REVISE your own
-      position with evidence, and concede where they are right. Be rigorous, not stubborn.
+      You are participating in a structured research debate as the {{role}} perspective. In this
+      turn you examine the other perspectives' hypotheses: point out real weak points and
+      concede where they are right. Be rigorous, not contrary for its own sake.
     user: |
-      Your previous position ({{role}}), numbered:
+      Examine the other perspectives' hypotheses point by point.
+
+      Your own position ({{role}}), for reference:
       {{own_position}}
 
       Other perspectives this round, each under its name and numbered:
@@ -440,25 +497,95 @@ sub_prompts:
       Synthesis the hypotheses must stay grounded in:
       {{synthesis_json}}
 
-      First answer the other perspectives point by point in "responses". Each answer is about one
-      of their hypotheses: "to" is the perspective's name as written after ###, "hypothesis" is
-      that hypothesis's number, "stance" is "challenge" (a weak point: a confound, a claim the
-      cards do not support, a test that cannot fail) or "concede" (it is right and you take it
-      on board), and "text" says why in one or two sentences. Do not name perspectives inside
-      "text"; "to" already says whom you answer.
-      Then write your updated position. Keep your hypotheses in their numbered order: a revised
-      hypothesis keeps its number and new ones go at the end. Keep the same hypothesis schema and
-      keep gap_id and evidence_refs valid.
+      Each answer is about one of their hypotheses: "to" is the perspective's name as written
+      after ###, "hypothesis" is that hypothesis's number, "stance" is "challenge" (a weak point:
+      a confound, a claim the cards do not support, a test that cannot fail, a tension it claims
+      to settle but would not decide) or "concede" (it is right as it stands), and "text" says
+      why in one or two sentences. Do not name perspectives inside "text"; "to" already says whom
+      you answer. Skip hypotheses marked WITHDRAWN.
+      {{> objection_rules}}
+      {{> json_rules}}
+      Return {"responses": [{"to": "<perspective>", "hypothesis": 1, "stance": "challenge", "severity": "fatal", "flaw": "unsupported", "field": "statement", "card_id": null, "text": "..."}, {"to": "<perspective>", "hypothesis": 2, "stance": "concede", "text": "..."}]}
+
+  debate_answer:
+    json_mode: true
+    max_tokens: 6144
+    system: |
+      You are participating in a structured research debate as the {{role}} perspective. The
+      other perspectives have challenged some of your hypotheses. Answer every challenge on its
+      merits: revise the hypothesis when the point is right, defend it with evidence when it is
+      not, or withdraw it when it cannot be saved. Be rigorous, not stubborn.
+    user: |
+      Answer each challenge to your position.
+
+      Your position ({{role}}), numbered:
+      {{own_position}}
+
+      Challenges to your hypotheses, numbered:
+      {{challenges}}
+
+      Allowed evidence references: {{valid_refs}}
+      Allowed gap ids: {{valid_gaps}}
+      Synthesis the hypotheses must stay grounded in:
+      {{synthesis_json}}
+
+      Answer EVERY challenge exactly once in "answers": "challenge" is its number, "action" is
+      "revise" (you rewrite that hypothesis so the point no longer holds), "defend" (you keep it
+      and say, citing the cards, why the point does not hold; when a challenge is marked fatal
+      and you think it is only a caveat, say why here) or "withdraw" (you drop that hypothesis),
+      and "text" gives your reason in one or two sentences. The challenger reviews every answer.
+      Then write your full position in "hypotheses", in the same numbered order: a revised
+      hypothesis keeps its number and its statement changes; a defended one stays as it was; a
+      withdrawn one stays in place unchanged and its number goes in "withdrawn"; one already
+      marked WITHDRAWN above is written as {"statement": "WITHDRAWN"}. You may add a new
+      hypothesis at the end to replace one you withdraw or one hit by a fatal challenge; it is
+      reviewed like the others. Keep the same hypothesis schema and keep gap_id, evidence_refs and
+      tension_ids valid.
       {{> hypothesis_schema}}
       {{> json_rules}}
-      Return {"responses": [{"to": "<perspective>", "hypothesis": 1, "stance": "challenge", "text": "..."}], "hypotheses": [ ... ]}
+      Return {"answers": [{"challenge": 1, "action": "revise", "text": "..."}], "hypotheses": [ ... ], "withdrawn": []}
+
+  debate_review:
+    json_mode: true
+    max_tokens: 4096
+    temperature: 0
+    system: |
+      You are participating in a structured research debate as the {{role}} perspective. You
+      challenged some hypotheses and their authors have answered. Judge each answer on its
+      merits: an objection is resolved when the revision or the defence removes it, not when the
+      author merely disagrees. Do not repeat an objection the answer has dealt with.
+    user: |
+      Review the answers to your challenges, then the hypotheses added this round.
+
+      Your challenges and the answers, numbered (each shows the hypothesis as it now reads):
+      {{answered}}
+
+      Hypotheses added this round, numbered:
+      {{added}}
+
+      Allowed evidence references: {{valid_refs}}
+      Synthesis the hypotheses must stay grounded in:
+      {{synthesis_json}}
+
+      In "reviews", review EVERY numbered challenge exactly once: "item" is its number, "verdict"
+      is "resolved" (the answer removes the objection) or "stands" (it does not; "text" says
+      what the answer leaves unaddressed, not the original point again). An objection that
+      stands keeps its severity or is lowered from fatal to caveat; it is never raised. A fatal
+      one that stands names its flaw.
+      In "added", answer each added hypothesis as in a critique: "item" is its number, "stance"
+      is "challenge" or "concede", with "severity", "flaw", "field" and "card_id" for a
+      challenge. Leave "added" empty when there are none.
+      {{> objection_rules}}
+      {{> json_rules}}
+      Return {"reviews": [{"item": 1, "verdict": "resolved", "text": "..."}, {"item": 2, "verdict": "stands", "severity": "caveat", "text": "..."}], "added": [{"item": 1, "stance": "concede", "text": "..."}]}
 
   debate_judge:
     json_mode: true
     max_tokens: 2048
+    temperature: 0
     system: |
-      You are an INDEPENDENT judge, distinct from the debating models. Evaluate only; do not
-      rewrite or merge the positions.
+      You are the judge of this research debate. Evaluate only; do not rewrite or merge the
+      positions. Judge each perspective on its own evidence, not on who wrote it.
     user: |
       Score each perspective 1-10 for rigor, evidence and falsifiability, then rank them best
       first with a one-line reason each.

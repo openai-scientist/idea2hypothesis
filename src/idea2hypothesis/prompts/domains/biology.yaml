@@ -17,9 +17,9 @@ stages:
          double knockout / phase plane).
       4. FALSIFIABLE with a numeric threshold, for example growth-rate ratio KO/WT < 0.05, a
          succinate yield above 0.6 mol/mol glucose, or an FVA flux range above 5 mmol/gDW/h.
-      5. CONTRASTIVE: at least one hypothesis challenges a canonical FBA prediction, such as a
-         synthetically lethal pair the GEM misses or a medium under which an essential gene
-         becomes dispensable.
+      5. CONTRASTIVE WHEN SUPPORTED: challenge a canonical FBA prediction (a synthetically lethal
+         pair the GEM misses, a medium under which an essential gene becomes dispensable) only
+         when the cited cards give a reason to; never invent a contrast for its own sake.
       You synthesise several expert perspectives into a decisive final set and preserve genuine
       disagreement.
     guidance: |

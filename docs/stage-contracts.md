@@ -92,7 +92,9 @@ quality) are kept; the others that cleared both bars are `below_cutoff` with the
 reason. Papers that never received scores (`unscored`, `prefiltered`) carry
 `null` scores and are excluded; they never get default values. `shortlist.jsonl`: the kept
 candidates plus `relevance_score`, `quality_score` in `[0, 1]` and `keep_reason`.
-`screen_meta.json`: `outcome`, counts, `keywords`, batches.
+`screen_meta.json`: `outcome`, counts, `keywords`, batches. `review.json` `reviewer_view` lists
+what the reviewer model saw of each paper (`fields`, `abstract_max_chars`); a decision on an
+abstract longer than that carries `abstract_cut_at`.
 
 Pass conditions: every candidate has a decision and a reason; kept papers in `review.json` equal
 the shortlist; the shortlist is a non-empty subset of the candidates. An empty shortlist fails with
@@ -101,12 +103,20 @@ decision `dropped_by_reviewer`.
 
 ## Stage 6: KNOWLEDGE_EXTRACT
 
-One card per shortlisted paper that has an abstract (`skipped` in `knowledge_meta.json` lists the
-others with a reason). `cards/<card_id>.json`: `card_id` = `card-<paper_id>`, `paper_id`, `title`,
-`cite_key`, `year`, `venue`, `doi`, `arxiv_id`, `url`, `evidence_scope` (`abstract` or `full_text`), and `problem`, `method`, `data`, `metrics`,
-`findings`, `limitations`, each text or `null`. Nothing is filled with template text. Every card
+One card per shortlisted paper that has an abstract and whose card its abstract can back
+(`skipped` in `knowledge_meta.json` lists the others with a reason). `cards/<card_id>.json`:
+`schema_version` (2), `card_id` = `card-<paper_id>`, `paper_id`, `title`, `cite_key`, `year`,
+`venue`, `doi`, `arxiv_id`, `url`, `evidence_scope` (`abstract` or `full_text`), and `problem`,
+`method`, `data`, `metrics`, `findings`, `limitations`, each text or `null`, and `quotes`:
+`{field: [passage, ...]}` for every filled field. Nothing is filled with template text. Every card
 also has a `.md` rendering. `knowledge_meta.json`: `shortlist_size`, `cards`, `evidence_scope`,
-`skipped`.
+`quoted`, `skipped`.
+
+Pass conditions for schema 2 cards: every filled field has 1 to 3 quotes, each at least four words
+long and found in the paper's abstract (from the shortlist) after normalisation: Unicode NFKC,
+curly quotes and dash variants folded, HTML tags removed, case folded, white space collapsed,
+surrounding quote marks and ellipses stripped. A `null` field has no quotes. Schema 1 cards,
+written before quotes existed, are checked without them.
 
 ## Stage 7: SYNTHESIS
 
@@ -117,20 +127,73 @@ or in `set_aside` (`id`, `card_ids`, `reason`) when it bears on no school of tho
 neither fails the answer and the model is asked again. Numbers in the text that do not appear in any card are reported as warnings
 (`synthesis mentions '...' which does not appear in any card`).
 
+From `schema_version` 2 every tension (a point where cards disagree) has an `id` (`X1`, `X2`, ...),
+`between` (cluster ids that exist), `text` and exactly two `sides`, each with a `claim` and the
+`card_ids` behind it (at least one existing card per side, no card on both sides). Cards that agree
+give an empty `tensions` list. Syntheses of schema 1 have tensions without ids or sides and are
+read as before.
+
 ## Stage 8: HYPOTHESIS_GEN
 
-`hypotheses.json`: `hypotheses` (at least 2) with `id`, `statement`, `gap_id` (a real gap),
+`hypotheses.json`: `hypotheses` (between `research.min_hypotheses` and `research.max_hypotheses`,
+default 3 to 6, never fewer than 2) with `id`, `statement`, `gap_id` (a real gap),
 `sub_question_ids`, `evidence_refs` (card ids or shortlisted paper ids that resolve), `exposure`,
 `outcome`, `estimand`, `method`, `conditions`, `prediction` (`> 0`, `< 0` or `≠ 0`),
 `falsification_criteria` (at least 25 characters and a concrete failing observation such as a
 threshold or interval), `limitations`, `rationale`, `novelty`, `risk`. `novelty` and `rationale`
-must differ between hypotheses (near-duplicates fail the stage). `perspectives/` holds the
-per-role generations (`<role>.json`), debate rounds (`<role>.r<N>.json`) and `debate_record.json`
-when `llm.debate_rounds > 0`. A debate round holds `hypotheses` (revised ones keep their number,
-new ones follow), `responses` (`to` another role, `hypothesis` number, `stance` `challenge` or
-`concede`, `text`; answers that name no such hypothesis are left out with a warning), `revised`
-and `added` (hypothesis numbers); at least one perspective output must exist or the stage fails with
-`NO_PERSPECTIVES`. `disagreements` lists unresolved points between perspectives.
+must differ between hypotheses (near-duplicates fail the stage). `tension_ids` lists the synthesis
+tensions a hypothesis settles; each id must exist, and when the synthesis has tensions with ids at
+least one hypothesis must settle one (otherwise the answer is sent back). `open_tensions` lists the
+tensions no hypothesis of the set settles. `disagreements` lists unresolved points between
+perspectives.
+
+Every final hypothesis lists in `from` the debate candidates it is built from (`<role>-<number>`,
+such as `innovator-2`); each must exist and not be withdrawn. A candidate with a fatal objection
+that still stands may be used only when the set cannot reach `min_hypotheses` from the others;
+otherwise the answer is sent back. The stage then records, from the debate, what still stands
+against each hypothesis's sources: `contested` (fatal objections: `candidate`, `from` the critic,
+`severity`, `flaw`, `field`, `card_id`, `text`) and `caveats` (same fields; each caveat is also
+added to `limitations` as "Debate caveat from the <role> perspective: ..."). `held_back` lists the
+candidates with a fatal objection standing that the set does not use (`candidate`, `role`,
+`number`, `hypothesis`, `objections`). After the hypotheses gate, `human_review` holds the
+reviewer's `dropped` and `kept`, and a kept candidate joins the set under a new id with
+`kept_by_reviewer` (the reviewer's note) and its objections still in `contested`.
+
+`perspectives/` holds the per-role generations (`<role>.json`) and, when `llm.debate_rounds > 0`,
+each round in three phases plus `debate_record.json`:
+
+* `<role>.r<N>.critique.json` (`phase: "critique"`): `responses` to the other roles (`to`,
+  `hypothesis` number, `stance` `challenge` or `concede`, `text`). Every challenge has `severity`
+  `fatal` or `caveat`; a fatal one names its `flaw` (`unsupported`, `unfalsifiable`,
+  `undecidable_test` or `already_established`) and the hypothesis `field` that holds it, and
+  `already_established` names in `card_id` an allowed reference that already shows the claim. A
+  challenge missing any of these is sent back. Responses that name no standing hypothesis of
+  another role are left out with a warning.
+* `<role>.r<N>.json` (`phase: "answer"`), written only for a role that was challenged: `answers`,
+  one per challenge it received (`challenge` number, `from` and `response`: the critic and the
+  place of the challenge in its `responses`, `hypothesis`, `action` `revise`, `defend` or
+  `withdraw`, `text`), the updated `hypotheses` (numbering kept, new ones at the end), `revised`,
+  `added` and `withdrawn` (hypothesis numbers). An answer that leaves a challenge unanswered, says
+  `revise` without changing the statement, or withdraws a hypothesis it does not list in
+  `withdrawn` is sent back. A role whose answer still fails keeps its position, a warning names
+  the unanswered challenges, and they stand as raised.
+* `<role>.r<N>.review.json` (`phase: "review"`), for each critic with answered challenges or with
+  hypotheses added that round by others: `reviews`, one per answered challenge (the challenge with
+  its `answer`, and `review`: `verdict` `resolved` or `stands` with `text`); a challenge that
+  stands keeps its severity or is lowered from fatal to caveat, never raised, and a fatal one
+  keeps a flaw; then `added`, the critique of the added hypotheses (same rules as a critique).
+  A review that skips an answered challenge or raises a caveat is sent back; a critic whose
+  review still fails leaves its challenges standing as raised.
+* `debate_record.json`: `rounds`, `roles`, `concessions`, `answers` (per role, counts per action),
+  `withdrawn` (per role, numbers), `objections` (every challenge with its answer, review and
+  `status`: `stands`, `resolved` or `withdrawn`), `independent_judge` and the judge's
+  `rankings`. Withdrawn hypotheses take no further part: critiques of them are dropped, and
+  neither the judge nor the final merge sees them. The judge and the merge see every candidate
+  with the objections that still stand against it.
+
+At least one perspective output must exist or the stage fails with `NO_PERSPECTIVES`. Rounds
+written by earlier versions hold `responses` and the revised `hypotheses` in one
+`<role>.r<N>.json` and are read as before.
 
 `novelty_report.json` (when enabled): `kind: "novelty_assessment"`, a `disclaimer` stating it is a
 heuristic assessment and not proof of novelty, `novelty_score`, `assessment`, `recommendation`,
@@ -170,5 +233,7 @@ hypothesis traceable to its evidence.
 Editing an artifact through the API validates it against the same rules; the changed stage is
 re-manifested and every later stage is moved to `attempts/<n>/` before it can run again, so a stale
 downstream output is never read after an upstream edit. A rejected gate does the same for stages
-from the rollback point (stage 3 for the screening gate, stage 1 for the scope gate) with a new
-attempt number.
+from the rollback point (stage 3 for the screening gate, stage 1 for the scope gate, stage 8 for
+the hypotheses gate) with a new attempt number. A gate before the rollback point that was
+approved stays approved in the new attempt (`carried_from` names the original), since the stages
+it approved do not run again.

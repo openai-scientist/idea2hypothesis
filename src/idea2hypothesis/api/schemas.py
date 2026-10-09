@@ -56,6 +56,8 @@ class RunStateResponse(BaseModel):
 class GateAnswerRequest(BaseModel):
     option_id: str
     dropped: list[str] = Field(default_factory=list)
+    #: Held-back hypotheses kept despite their objection (hypotheses gate), by thread id (T2)
+    kept: list[str] = Field(default_factory=list)
     note: str | None = None
 
 

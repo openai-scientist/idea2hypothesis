@@ -21,7 +21,7 @@ from idea2hypothesis.pipeline.runner import (
     resume_pipeline,
     run_pipeline,
 )
-from tests.conftest import make_services, request
+from tests.conftest import make_config, make_services, request
 from tests.fixtures import FixtureLLM
 
 
@@ -76,7 +76,13 @@ async def test_resume_while_gate_unanswered_stays_awaiting_review(tmp_path: Path
 async def test_approving_the_gate_continues_to_completion(tmp_path: Path) -> None:
     services = make_services(tmp_path, review={"mode": "copilot"})
     first = await run_pipeline(request(), services)
-    result = await answer_gate(first.run_id, first.gate["gate_id"], GateAnswer("approve"), services)
+    second = await answer_gate(first.run_id, first.gate["gate_id"], GateAnswer("approve"), services)
+    # Copilot stops again once the hypotheses are written, before they are mapped.
+    assert second.status is RunStatus.AWAITING_REVIEW
+    assert second.gate["kind"] == "hypotheses" and second.completed_stages == tuple(range(1, 9))
+    result = await answer_gate(
+        first.run_id, second.gate["gate_id"], GateAnswer("approve"), services
+    )
 
     assert result.status is RunStatus.COMPLETED
     assert result.completed_stages == (1, 2, 3, 4, 5, 6, 7, 8, 9)
@@ -98,7 +104,7 @@ async def test_approving_with_dropped_papers_excludes_them(tmp_path: Path) -> No
         services,
     )
 
-    assert result.status is RunStatus.COMPLETED
+    assert result.status is RunStatus.AWAITING_REVIEW and result.gate["kind"] == "hypotheses"
     assert dropped not in {r["paper_id"] for r in art.read_jsonl(5, "shortlist.jsonl")}
     assert dropped not in {
         c["paper_id"]
@@ -189,9 +195,13 @@ async def test_full_mode_opens_scope_gate_after_stage_2(tmp_path: Path) -> None:
     assert second.status is RunStatus.AWAITING_REVIEW
     assert second.gate["kind"] == "screen"
 
-    done = await answer_gate(second.run_id, second.gate["gate_id"], GateAnswer("approve"), services)
+    third = await answer_gate(
+        second.run_id, second.gate["gate_id"], GateAnswer("approve"), services
+    )
+    assert third.gate["kind"] == "hypotheses"
+    done = await answer_gate(third.run_id, third.gate["gate_id"], GateAnswer("approve"), services)
     assert done.status is RunStatus.COMPLETED
-    assert _types(services, first.run_id).count("gate.opened") == 2
+    assert _types(services, first.run_id).count("gate.opened") == 3
 
 
 async def test_rejecting_the_scope_gate_reruns_from_stage_1(tmp_path: Path) -> None:
@@ -363,3 +373,92 @@ async def test_platform_id_claim_is_idempotent(tmp_path: Path) -> None:
     from idea2hypothesis.storage.runs import RunStore
 
     assert RunStore(services.config.runs_root).find_by_platform("plat-1") == "run-a"
+
+
+def _blocking_review(info: object) -> dict:
+    """The pragmatist keeps its fatal objection to the innovator's first hypothesis."""
+    data = FixtureLLM()._default_debate_review(info)  # type: ignore[arg-type]
+    if "as the pragmatist perspective" in info.system:  # type: ignore[attr-defined]
+        data["reviews"] = [
+            {"item": r["item"], "verdict": "stands", "severity": "fatal", "flaw": "unsupported",
+             "text": "the rewrite still cites no card for it"}
+            for r in data["reviews"]
+        ]  # fmt: skip
+    return data
+
+
+async def _at_hypotheses_gate(tmp_path: Path, llm: FixtureLLM):
+    cfg = make_config(tmp_path, review={"mode": "copilot"}, llm={"debate_rounds": 1})
+    services = make_services(tmp_path, llm=llm, config=cfg)
+    first = await run_pipeline(request(), services)
+    second = await answer_gate(first.run_id, first.gate["gate_id"], GateAnswer("approve"), services)
+    assert second.gate["kind"] == "hypotheses"
+    return services, second
+
+
+async def test_a_standing_fatal_objection_holds_a_candidate_back(tmp_path: Path) -> None:
+    llm = FixtureLLM(overrides={"debate_review": _blocking_review})
+    services, at_gate = await _at_hypotheses_gate(tmp_path, llm)
+    art = services.store.artifacts(at_gate.run_id)
+    doc = art.read_json(8, "hypotheses.json")
+    assert [b["candidate"] for b in doc["held_back"]] == ["innovator-1"]
+    assert doc["held_back"][0]["objections"][0]["flaw"] == "unsupported"
+    assert all("innovator-1" not in h["from"] for h in doc["hypotheses"])
+    merge = [c for c in llm.calls if c.key == "hypothesis_gen"][0].user
+    assert "### innovator-1 [FATAL]" in merge and "cites no card" in merge
+    opened = [e for e in services.store.read_events(at_gate.run_id) if e.type == "gate.opened"]
+    assert opened[-1].data["held_back"][0]["candidate"] == "innovator-1"
+
+
+async def test_the_reviewer_drops_hypotheses_and_keeps_a_held_back_one(tmp_path: Path) -> None:
+    llm = FixtureLLM(overrides={"debate_review": _blocking_review})
+    services, at_gate = await _at_hypotheses_gate(tmp_path, llm)
+    run_id, gate_id = at_gate.run_id, at_gate.gate["gate_id"]
+    with pytest.raises(GateError, match="not held back"):
+        await apply_gate_answer(run_id, gate_id, GateAnswer("approve", kept=("x-1",)), services)
+    with pytest.raises(GateError, match="not in the set"):
+        await apply_gate_answer(run_id, gate_id, GateAnswer("approve", ("H9",)), services)
+
+    answer = GateAnswer("approve", ("H3",), "worth a test anyway", ("innovator-1",))
+    done = await answer_gate(run_id, gate_id, answer, services)
+
+    assert done.status is RunStatus.COMPLETED
+    art = services.store.artifacts(run_id)
+    doc = art.read_json(8, "hypotheses.json")
+    assert [h["id"] for h in doc["hypotheses"]] == ["H1", "H2", "H4"]
+    kept = doc["hypotheses"][-1]
+    assert kept["from"] == ["innovator-1"] and kept["kept_by_reviewer"] == "worth a test anyway"
+    assert kept["contested"][0]["text"] == "the rewrite still cites no card for it"
+    assert doc["held_back"] == [] and doc["human_review"]["kept"] == ["innovator-1"]
+    assert "Kept by the reviewer" in art.read_text(8, "hypotheses.md")
+    mapped = {r["hypothesis_id"] for r in art.read_json(9, "argument_map.json")["rationales"]}
+    assert mapped == {"H1", "H2", "H4"}  # the map is drawn from the reviewed set
+
+
+async def test_rejecting_the_hypotheses_writes_a_new_set_with_the_note(tmp_path: Path) -> None:
+    llm = FixtureLLM()
+    services, at_gate = await _at_hypotheses_gate(tmp_path, llm)
+    perspectives = llm.count("perspective")
+    result = await answer_gate(
+        at_gate.run_id, at_gate.gate["gate_id"],
+        GateAnswer("reject", note="test screen time directly"), services,
+    )  # fmt: skip
+    assert result.attempt == 2 and result.gate["kind"] == "hypotheses"
+    assert llm.count("perspective") == 2 * perspectives
+    again = [c for c in llm.calls if c.key == "perspective"][perspectives:]
+    assert all("test screen time directly" in c.user for c in again)
+    assert "Previous hypotheses" in again[0].user
+    assert llm.count("knowledge_extract") == 9  # only stage 8 ran again
+
+
+async def test_a_gate_before_the_rollback_point_is_not_asked_again(tmp_path: Path) -> None:
+    services = make_services(tmp_path, review={"mode": "full"})
+    first = await run_pipeline(request(), services)
+    screen = await answer_gate(first.run_id, first.gate["gate_id"], GateAnswer("approve"), services)
+    again = await answer_gate(
+        first.run_id, screen.gate["gate_id"], GateAnswer("reject", note="wider"), services
+    )
+    # stages 1-2 are not redone, so their approved scope stands; the new shortlist is asked about
+    assert again.attempt == 2 and again.gate["kind"] == "screen"
+    checkpoint = services.store.read_checkpoint(first.run_id)
+    assert checkpoint["gates"]["gate-s02-a2"]["carried_from"] == "gate-s02-a1"

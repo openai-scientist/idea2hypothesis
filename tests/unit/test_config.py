@@ -47,6 +47,8 @@ def test_only_the_eight_sections_exist() -> None:
         ({"api": {"port": True}}, "api.port"),
         ({"api": {"cors_origins": "*"}}, "api.cors_origins"),
         ({"storage": {"runs_root": 3}}, "storage.runs_root"),
+        ({"research": {"min_hypotheses": 1}}, "research.min_hypotheses"),
+        ({"research": {"min_hypotheses": 5, "max_hypotheses": 4}}, "research.max_hypotheses"),
     ],
 )
 def test_errors_name_the_dotted_path(data: dict, path: str) -> None:

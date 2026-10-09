@@ -54,6 +54,9 @@ class ResearchConfig:
     novelty_check: bool = True
     #: Most papers kept for reading (best scores first); 0 keeps every paper that clears both bars.
     max_shortlist: int = 20
+    #: Size of the final hypothesis set: every hypothesis that survives the debate, within these.
+    min_hypotheses: int = 3
+    max_hypotheses: int = 6
 
 
 @dataclass(frozen=True)
@@ -241,8 +244,15 @@ def _parse_research(data: Any) -> ResearchConfig:
         min_topic_score=r.float("min_topic_score", d.min_topic_score, minimum=0.0),
         novelty_check=r.bool("novelty_check", d.novelty_check),
         max_shortlist=r.int("max_shortlist", d.max_shortlist, minimum=0),
+        min_hypotheses=r.int("min_hypotheses", d.min_hypotheses, minimum=2),
+        max_hypotheses=r.int("max_hypotheses", d.max_hypotheses, minimum=2),
     )
     r.finish()
+    if cfg.max_hypotheses < cfg.min_hypotheses:
+        raise ConfigError(
+            f"research.max_hypotheses: must be >= research.min_hypotheses ({cfg.min_hypotheses}), "
+            f"got {cfg.max_hypotheses}"
+        )
     return cfg
 
 

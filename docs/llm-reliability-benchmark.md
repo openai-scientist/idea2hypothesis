@@ -101,7 +101,7 @@ Weights are within the group.
 | `HYP-FAL-02` | Falsifiability | `falsification_criteria` names a concrete failing observation (threshold, interval, zero crossing), consistent with the `prediction` | 30% |
 | `HYP-UNI-03` | Anti-degeneracy | `novelty` and `rationale` are distinct per hypothesis (the contract rejects near-duplicates); mechanisms differ | 20% |
 | `HYP-LIN-04` | Lineage | `gap_id` resolves to a synthesis gap; `evidence_refs` resolve to cards or shortlisted papers | 15% |
-| `HYP-DEB-05` | Perspective structure | at least two perspective outputs; with `llm.debate_rounds > 0`, rebuttal rounds and a judge record exist | 10% |
+| `HYP-DEB-05` | Perspective structure | at least two perspective outputs; with `llm.debate_rounds > 0`, critique and answer rounds and a judge record exist | 10% |
 
 ## 3. Test scenarios
 

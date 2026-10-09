@@ -10,6 +10,7 @@ import pytest
 from idea2hypothesis.pipeline.models import RunStatus
 from idea2hypothesis.pipeline.runner import run_pipeline
 from tests.conftest import make_services, request
+from tests.fixtures import FixtureLLM
 
 SPEC_ARTIFACTS = {
     1: ["goal.json", "goal.md", "hardware_profile.json"],
@@ -115,3 +116,78 @@ async def test_cost_is_reported_when_responses_are_priced(tmp_path: Path) -> Non
     services = make_services(tmp_path, llm=FixtureLLM(cost_per_call=0.01), review={"mode": "auto"})
     result = await run_pipeline(request(), services)
     assert result.usage["cost_usd"] == pytest.approx(0.01 * result.usage["calls"])
+
+
+async def test_every_model_call_is_logged_as_sent_and_as_answered(auto_services) -> None:
+    result = await run_pipeline(request(), auto_services)
+    art = auto_services.store.artifacts(result.run_id)
+    for stage in (1, 2, 3, 5, 6, 7, 8, 9):
+        calls = art.read_llm_calls(stage, 1)
+        assert calls, f"stage {stage} has no call log"
+        for call in calls:
+            assert call["outcome"] == "accepted" and call["stage"] == stage
+            assert call["request"]["messages"][0]["role"] == "user"
+            assert call["response"]["text"] and call["response"]["model"] == "fixture-model"
+    screen = art.read_llm_calls(5, 1)[0]
+    assert screen["request"]["temperature"] == 0 and screen["label"].startswith("literature_screen")
+    final = [c for c in art.read_llm_calls(8, 1) if c["label"] == "hypothesis_gen"]
+    assert final[0]["request"]["temperature"] == auto_services.config.llm.temperature
+
+
+async def test_extraction_and_judgement_reach_the_model_at_temperature_zero(tmp_path: Path) -> None:
+    llm = FixtureLLM()
+    services = make_services(tmp_path, llm=llm, review={"mode": "auto"})
+    await run_pipeline(request(), services)
+    by_key: dict[str, set] = {}
+    for call in llm.calls:
+        by_key.setdefault(call.key, set()).add(call.temperature)
+    for key in ("literature_screen", "knowledge_extract", "synthesis", "argument_map"):
+        assert by_key[key] == {0}, key
+    assert by_key["hypothesis_gen"] == {None}  # the configured temperature
+
+
+async def test_a_repaired_answer_logs_the_rejected_round_with_its_reasons(tmp_path: Path) -> None:
+    bad = {"problem": "Invented", "method": None, "data": None, "metrics": None,
+           "findings": None, "limitations": None,
+           "quotes": {"problem": ["not in any abstract text"]}}  # fmt: skip
+    llm = FixtureLLM(overrides={"knowledge_extract": [bad]})
+    services = make_services(tmp_path, llm=llm, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+    assert result.status is RunStatus.COMPLETED, result.error
+    calls = services.store.artifacts(result.run_id).read_llm_calls(6, 1)
+    rejected = [c for c in calls if c["outcome"] == "rejected"]
+    assert len(rejected) == 1 and "word for word" in " ".join(rejected[0]["problems"])
+    repair = next(c for c in calls if c["label"] == rejected[0]["label"] and c["round"] == 2)
+    assert repair["outcome"] == "accepted" and len(repair["request"]["messages"]) == 3
+
+
+async def test_a_card_its_abstract_cannot_back_is_left_out_with_the_reason(tmp_path: Path) -> None:
+    def answer(info):
+        paper = info.section_json("Paper:\n")
+        if paper["title"].startswith("Sleep duration and academic"):
+            return {"problem": "Something else", "method": None, "data": None, "metrics": None,
+                    "findings": None, "limitations": None,
+                    "quotes": {"problem": ["words the abstract never had"]}}  # fmt: skip
+        return FixtureLLM()._default_knowledge_extract(info)
+
+    llm = FixtureLLM(overrides={"knowledge_extract": answer})
+    services = make_services(tmp_path, llm=llm, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+    assert result.status is RunStatus.COMPLETED, result.error
+    art = services.store.artifacts(result.run_id)
+    meta = art.read_json(6, "knowledge_meta.json")
+    skipped = [s for s in meta["skipped"] if "word for word" in s["reason"]]
+    assert len(skipped) == 1 and meta["cards"] == meta["shortlist_size"] - 1
+    assert not art.exists(6, f"cards/card-{skipped[0]['paper_id']}.json")
+
+
+async def test_the_screen_reviewer_reads_whole_abstracts(tmp_path: Path) -> None:
+    llm = FixtureLLM()
+    services = make_services(tmp_path, llm=llm, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+    art = services.store.artifacts(result.run_id)
+    review = art.read_json(5, "review.json")
+    assert review["reviewer_view"]["abstract_max_chars"] >= 4000
+    prompts = " ".join(c.user for c in llm.calls if c.key == "literature_screen")
+    for row in art.read_jsonl(4, "candidates.jsonl"):
+        assert row["abstract"] in prompts

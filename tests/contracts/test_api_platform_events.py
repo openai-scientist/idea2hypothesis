@@ -115,7 +115,8 @@ async def test_plan_and_stage_plans_use_the_ui_groups(tmp_path: Path) -> None:
         ("r1-hypothesize", "hypothesize", [8]),
         ("map", "map", [9]),
     ]
-    assert [s["has_gate"] for s in plan] == [False, False, True, False, False, False, False]
+    # copilot stops after screening and again once the hypotheses are written
+    assert [s["has_gate"] for s in plan] == [False, False, True, False, False, True, False]
     assert [g.key for g in GROUPS] == [s["key"] for s in plan]
     started = {e["stage_key"]: e["payload"]["plan"] for e in _of(events, "stage.started")}
     assert list(started) == ["scope", "search", "screen"]  # stops at the gate
@@ -411,36 +412,78 @@ async def test_a_restarted_stage_starts_its_ui_group_over(tmp_path: Path) -> Non
     assert len(after) == len(set(after)) and after
 
 
-async def test_a_debate_round_shows_concessions_revisions_and_the_judge(tmp_path: Path) -> None:
+async def test_a_debate_round_shows_critiques_answers_reviews_and_the_judge(
+    tmp_path: Path,
+) -> None:
     async with harness(tmp_path, llm_settings={"debate_rounds": 1}) as h:
         run_id, events = await _completed(h)
         rows = h.service.log._load(run_id)
         core = {e.seq: e for e in h.service.store.read_events(run_id)}
     turns = [e["payload"]["turn"] for e in _of(events, "debate.turn")]
-    stances = [t["stance"] for t in turns]
-    # 3 perspectives x 2 hypotheses, each revised once; one answer to each side, one unusable
-    assert stances.count("propose") == 6 and stances.count("refine") == 6
-    assert stances.count("challenge") == 3 and stances.count("concede") == 3
     by_id = {t["id"]: t for t in turns}
     assert len(by_id) == len(turns)
-    for t in turns:
-        assert t["about"]
-        if t["stance"] in ("challenge", "concede"):  # answers sit under the hypothesis they answer
-            parent = by_id[t["reply_to"]]
-            assert parent["stance"] == "propose" and parent["about"] == t["about"]
-            assert parent["actor"] != t["actor"]
-    assert {t["about"] for t in turns if t["stance"] == "propose"} == {
-        "T1", "T2", "M1", "M2", "S1", "S2"
-    }  # fmt: skip
+    phase = {p: [t for t in turns if t.get("phase") == p] for p in ("critique", "answer", "review")}
+    # 3 perspectives x 3 hypotheses; each critic raises one fatal challenge and concedes one
+    assert sum(1 for t in turns if t["stance"] == "propose") == 9
+    assert [t["stance"] for t in phase["critique"]].count("challenge") == 3
+    assert [t["stance"] for t in phase["critique"]].count("concede") == 3
+    for t in phase["critique"]:
+        parent = by_id[t["reply_to"]]
+        assert parent["stance"] == "propose" and parent["about"] == t["about"]
+        if t["stance"] == "challenge":
+            assert (t["severity"], t["flaw"], t["field"]) == ("fatal", "unsupported", "statement")
+    # the Theorist answers 2 (a rewrite, a defence), the Methodologist 1 (a rewrite)
+    assert sorted(t["stance"] for t in phase["answer"]) == ["defend", "refine", "refine"]
+    for t in phase["answer"]:
+        assert t["answers"] and t["reply_to"] == t["answers"][0]
+        for cid in t["answers"]:
+            assert by_id[cid]["stance"] == "challenge" and by_id[cid]["about"] == t["about"]
+    assert all(t["note"] for t in phase["answer"] if t["stance"] == "refine")
+    # each critic reviews the answer to its challenge: two resolved, one stands as a caveat
+    reviews = phase["review"]
+    assert sorted(t["stance"] for t in reviews) == ["challenge", "concede", "concede"]
+    stands = next(t for t in reviews if t["stance"] == "challenge")
+    assert stands["severity"] == "caveat" and stands["actor"] == "skeptic"
+    for t in reviews:
+        assert by_id[t["reply_to"]]["phase"] == "answer"  # it replies to the answer it reviews
+        assert by_id[t["answers"][0]]["actor"] == t["actor"]  # about its own challenge
+    order = [t.get("phase") for t in turns]
+    assert order.index("answer") > max(i for i, p in enumerate(order) if p == "critique")
+    assert order.index("review") > max(i for i, p in enumerate(order) if p == "answer")
     judge = [t for t in turns if t["id"] == "judge"]
     assert len(judge) == 1 and judge[0]["actor"] == "pi" and "7/10" in judge[0]["text"]
-    assert judge[0]["about"] == "Verdict"
-    # the rebuttals and the verdict are sent while stage 8 runs, not when it completes
+    # the final set is built from candidates that survived, with what still stands on record
+    hypotheses = [e["payload"]["hypothesis"] for e in _of(events, "hypothesis.drafted")]
+    assert [h["from"] for h in hypotheses] == [["T1"], ["T2"], ["T3"]]
+    assert [c["by"] for c in hypotheses[0]["caveats"]] == ["skeptic"]
+    assert any("Debate caveat" in str(x) for x in hypotheses[0]["limitations"])
+    assert all(not h["contested"] for h in hypotheses)
+    # everything in the debate is sent while stage 8 runs
     sent = [r for r in rows if r["type"] == "debate.turn"]
     assert all(core[r["_core_seq"]].type == "stage.progress" for r in sent)
     lines = [e["payload"]["text"] for e in _of(events, "agent.message")]
     assert any("same model as the perspectives" in t for t in lines)  # no reviewer configured
-    assert any("answered each other in 1 round" in t for t in lines)
+    assert any(
+        "answered each other in 1 round (3 challenged, 3 answered, 2 resolved on review, "
+        "1 still standing)" in t
+        for t in lines
+    )
+    assert any("reviewed 1 answer: 0 resolved, 1 still standing (0 fatal)" in t for t in lines)
+
+
+async def test_tensions_carry_their_sides_and_the_hypotheses_that_settle_them(
+    tmp_path: Path,
+) -> None:
+    async with harness(tmp_path) as h:
+        _, events = await _completed(h)
+    (tension,) = [e["payload"]["tension"] for e in _of(events, "synthesis.tension")]
+    assert tension["id"] == "X1" and tension["between"] == ["C1", "C2"]
+    assert [len(side["card_ids"]) for side in tension["sides"]] == [1, 1]
+    hypotheses = [e["payload"]["hypothesis"] for e in _of(events, "hypothesis.drafted")]
+    assert hypotheses[0]["tension_ids"] == ["X1"]
+    assert all(h["tension_ids"] == [] for h in hypotheses[1:])
+    lines = [e["payload"]["text"] for e in _of(events, "agent.message")]
+    assert any("1 tension of the literature settled (X1)" in t for t in lines)
 
 
 class _Sources:
@@ -520,3 +563,13 @@ async def test_the_map_draws_each_relation_after_both_its_ends(tmp_path: Path) -
     assert steps == ["questions", "foundation", "reasoning", "contribution", "canvas"]
     summary = _of(drawn, "stage.completed")[0]["payload"]["summary"]
     assert f"{len(graph['entities'])} entities" in summary
+
+
+async def test_cards_carry_their_quotes_and_the_topic_score_its_basis(tmp_path: Path) -> None:
+    async with harness(tmp_path) as h:
+        _, events = await _completed(h)
+    cards = [e["payload"]["card"] for e in _of(events, "card.extracted")]
+    assert cards and all(c["quotes"]["findings"] for c in cards)
+    assert all(set(c["quotes"]) <= {k for k in c if c[k]} for c in cards)
+    score = _of(events, "topic.evaluated")[0]["payload"]
+    assert score["basis"] == "model judgement before any literature search"

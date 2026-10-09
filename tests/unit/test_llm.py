@@ -389,3 +389,11 @@ def test_bedrock_without_credentials_fails_at_build_time(monkeypatch: pytest.Mon
     cfg = load_config({"llm": {"provider": "bedrock", "model": "anthropic.claude"}})
     with pytest.raises(LLMConfigError, match="AWS credentials"):
         build_llm(cfg.llm)
+
+
+async def test_bedrock_sends_a_zero_temperature_instead_of_its_default() -> None:
+    llm, client = make_bedrock([converse_ok("a"), converse_ok("b")])
+    await llm.chat([ChatMessage.user("x")], temperature=0)
+    await llm.chat([ChatMessage.user("x")], temperature=0.4)
+    assert client.requests[0]["inferenceConfig"]["temperature"] == 0
+    assert client.requests[1]["inferenceConfig"]["temperature"] == 0.4

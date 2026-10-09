@@ -249,7 +249,8 @@ _STEPS: dict[str, tuple[str, str, int, str | None, str]] = {
         "theorist",
         8,
         "Perspectives",
-        "Each perspective proposes hypotheses (and rebuts when debate rounds are on).",
+        "Each perspective proposes hypotheses; in debate rounds they challenge each other, answer "
+        "every challenge, and review the answers.",
     ),
     "write": (
         "Write each hypothesis",
@@ -266,6 +267,13 @@ _STEPS: dict[str, tuple[str, str, int, str | None, str]] = {
         "Heuristic comparison with the papers already retrieved.",
     ),
     "select": ("Pick the set", "pi", 8, None, "The final hypotheses of this run."),
+    "hypotheses_gate": (
+        "Human check: hypotheses",
+        "pi",
+        8,
+        None,
+        "Approve the set, drop hypotheses, keep a held-back one, or ask for a new set.",
+    ),
     "questions": (
         "Lay out the questions",
         "strategist",
@@ -546,6 +554,7 @@ def _topic_evaluated(art: ArtifactStore) -> tuple[str, dict[str, Any]]:
             "threshold": e.get("threshold"),
             "reasons": e.get("reasons") or {},
             "advice": e.get("suggestion", ""),
+            "basis": e.get("basis") or "model judgement before any literature search",
         },
     )
 
@@ -775,6 +784,9 @@ def _card_extracted(
         "unknown_fields": [k for k in _CARD_FIELDS if card.get(k) is None],
     }
     payload.update({k: card.get(k) or "" for k in _CARD_FIELDS})
+    # The abstract's own words behind each filled field (cards from schema 2 on).
+    if isinstance(card.get("quotes"), dict):
+        payload["quotes"] = {k: list(v) for k, v in card["quotes"].items() if v}
     return ("card.extracted", {"card": payload})
 
 
@@ -794,6 +806,17 @@ def _set_aside(syn: dict[str, Any]) -> list[dict[str, Any]]:
         for i, a in enumerate(syn.get("set_aside") or [], 1)
         if isinstance(a, dict) and a.get("card_ids")
     ]
+
+
+def _tension(t: dict[str, Any]) -> dict[str, Any]:
+    """A point where cards disagree; from synthesis schema 2 on with an id and the cards on each
+    of its two sides."""
+    out: dict[str, Any] = {"between": t["between"], "text": t["text"]}
+    if t.get("id"):
+        out["id"] = t["id"]
+    if t.get("sides"):
+        out["sides"] = [{"claim": x["claim"], "card_ids": x["card_ids"]} for x in t["sides"]]
+    return out
 
 
 def _content_stage7(art: ArtifactStore) -> StepEvents:
@@ -818,8 +841,7 @@ def _content_stage7(art: ArtifactStore) -> StepEvents:
         if syn.get("overview")
         else [],
         "tension": [
-            ("synthesis.tension", {"tension": {"between": t["between"], "text": t["text"]}})
-            for t in syn.get("tensions") or []
+            ("synthesis.tension", {"tension": _tension(t)}) for t in syn.get("tensions") or []
         ],
         "gaps": [
             (
@@ -876,19 +898,25 @@ _VERDICT = "Verdict"
 _ZONES: dict[str, list[int | None]] = {"> 0": [None, 0], "< 0": [0, None], "≠ 0": [0, 0]}
 
 
+#: Order of a round's documents: the critiques come before the authors' answers to them. A
+#: document of an older run holds both in one file and keeps the answer's place.
+_PHASES = {"critique": 1, "answer": 2, "review": 3}
+
+
 def _turns(art: ArtifactStore) -> list[tuple[str, dict[str, Any]]]:
-    rows: list[tuple[int, str, dict[str, Any]]] = []
+    rows: list[tuple[int, int, str, dict[str, Any]]] = []
     for name in art.list_files(8):
         if not (name.startswith("perspectives/") and name.endswith(".json")):
             continue
         if name.endswith("debate_record.json"):
             continue
         doc = art.read_json(8, name)
-        if "role" not in doc or "hypotheses" not in doc:
+        if "role" not in doc or not ("hypotheses" in doc or "responses" in doc or "reviews" in doc):
             continue
-        rows.append((int(doc.get("round", 0)), str(doc["role"]), doc))
-    rows.sort(key=lambda r: (r[0], r[1]))
-    turns = [t for _, _, doc in rows for t in _turns_of(doc)]
+        phase = _PHASES.get(str(doc.get("phase")), 2)
+        rows.append((int(doc.get("round", 0)), phase, str(doc["role"]), doc))
+    rows.sort(key=lambda r: r[:3])
+    turns = [t for *_, doc in rows for t in _turns_of(doc)]
     if art.exists(8, "perspectives/debate_record.json"):
         turns += _judge_turn(art.read_json(8, "perspectives/debate_record.json"))
     return turns
@@ -919,8 +947,12 @@ def _turn(
     about: str,
     reply_to: str | None = None,
     actor: str | None = None,
+    phase: str | None = None,
+    answers: list[str] | None = None,
+    note: str | None = None,
+    objection: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    payload = {
+    payload: dict[str, Any] = {
         "id": turn_id,
         "actor": actor or _ROLE_ACTORS.get(role, "theorist"),
         "stance": stance,
@@ -931,19 +963,92 @@ def _turn(
     }
     if reply_to:
         payload["reply_to"] = reply_to
+    if phase:
+        payload["phase"] = phase
+    if answers:  # the challenges this turn answers
+        payload["answers"] = answers
+    if note:  # why the author rewrote the claim
+        payload["note"] = _named(note)
+    if objection and objection.get("severity"):  # how serious a challenge is
+        payload["severity"] = objection["severity"]
+        for key in ("flaw", "field", "card_id"):
+            if objection.get(key):
+                payload[key] = objection[key]
     return ("debate.turn", {"turn": payload})
+
+
+def _challenge_id(rnd: int, answer: dict[str, Any]) -> str:
+    """The turn of the challenge an answer is about: its critic's ``response``-th critique."""
+    return f"{answer['from']}-r{rnd}-{int(answer['response'])}"
+
+
+def _answer_id(rnd: int, objection: dict[str, Any]) -> str | None:
+    """The author's turn that answered a challenge: its rewrite, or its defence or withdrawal."""
+    answer = objection.get("answer") or {}
+    if objection.get("response") is None or not answer:
+        return None
+    if answer.get("action") == "revise":
+        return f"{objection['to']}-r{rnd}-h{int(objection['hypothesis'])}"
+    return f"{objection['critic']}-r{rnd}-{int(objection['response'])}-answer"
+
+
+def _review_turns(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """A critic's review: each answered challenge resolved (a concession) or standing (a
+    challenge again, at the severity it keeps); then its critique of the added hypotheses."""
+    rnd, critic = int(doc.get("round", 0)), str(doc["role"])
+    turns = []
+    for r in doc.get("reviews") or []:
+        verdict = (r.get("review") or {}).get("verdict")
+        text = (r.get("review") or {}).get("text") or ""
+        cid = f"{critic}-r{rnd}-{int(r['response'])}" if r.get("response") is not None else None
+        stands = verdict == "stands"
+        turns.append(
+            _turn(
+                f"{critic}-r{rnd}-v{int(r['item'])}",
+                critic,
+                rnd,
+                "challenge" if stands else "concede",
+                text or ("The objection stands." if stands else "The answer resolves it."),
+                about=_idea(str(r["to"]), int(r["hypothesis"])),
+                reply_to=_answer_id(rnd, r) or cid,
+                phase="review",
+                answers=[cid] if cid else None,
+                objection=r if stands else None,
+            )  # fmt: skip
+        )
+    for a in doc.get("added") or []:
+        turns.append(
+            _turn(
+                f"{critic}-r{rnd}-x{int(a['item'])}",
+                critic,
+                rnd,
+                str(a["stance"]),
+                str(a.get("text") or ""),
+                about=_idea(str(a["to"]), int(a["hypothesis"])),
+                reply_to=f"{a['to']}-r{rnd}-h{int(a['hypothesis'])}",
+                phase="review",
+                objection=a if a["stance"] == "challenge" else None,
+            )  # fmt: skip
+        )
+    return turns
 
 
 def _turns_of(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """One perspective's turns. Each hypothesis is a thread: a proposal starts it, the others'
-    challenges and concessions reply to it, and its author's revision follows."""
+    challenges and concessions reply to it, and its author answers each challenge by rewriting
+    the claim, defending it or withdrawing it."""
     rnd, role = int(doc.get("round", 0)), str(doc["role"])
-    hyps = doc["hypotheses"]
+    hyps = doc.get("hypotheses") or []
+    phase = doc.get("phase")
 
-    def own(i: int, turn_id: str, stance: str) -> tuple[str, dict[str, Any]]:
+    def own(i: int, turn_id: str, stance: str, **extra: Any) -> tuple[str, dict[str, Any]]:
         statement = str(hyps[i - 1].get("statement", ""))
-        return _turn(turn_id, role, rnd, stance, statement, about=_idea(role, i))
+        return _turn(
+            turn_id, role, rnd, stance, statement, about=_idea(role, i), phase=phase, **extra
+        )
 
+    if phase == "review":
+        return _review_turns(doc)
     if rnd == 0:
         return [own(i, f"{role}-h{i}", "propose") for i in range(1, len(hyps) + 1)]
     turns = [
@@ -951,12 +1056,62 @@ def _turns_of(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
             f"{role}-r{rnd}-{k}", role, rnd, str(r["stance"]), str(r["text"]),
             about=_idea(str(r["to"]), int(r["hypothesis"])),
             reply_to=f"{r['to']}-h{int(r['hypothesis'])}",
+            phase=phase,
+            objection=r,
         )
         for k, r in enumerate(doc.get("responses") or [], 1)
     ]  # fmt: skip
     numbers = range(1, len(hyps) + 1)
-    for key, stance in (("revised", "refine"), ("added", "propose")):
-        turns += [own(i, f"{role}-r{rnd}-h{i}", stance) for i in doc.get(key) or [] if i in numbers]
+    answers = [a for a in doc.get("answers") or [] if isinstance(a, dict)]
+    revised = set(doc.get("revised") or [])
+    withdrawn = set(doc.get("withdrawn") or [])
+    for i in numbers:
+        mine = [a for a in answers if a.get("hypothesis") == i]
+        for a in mine:
+            if a["action"] in ("defend", "withdraw"):
+                cid = _challenge_id(rnd, a)
+                stance = "defend" if a["action"] == "defend" else "concede"
+                turns.append(
+                    _turn(
+                        f"{cid}-answer",
+                        role,
+                        rnd,
+                        stance,
+                        str(a["text"]),
+                        about=_idea(role, i),
+                        reply_to=cid,
+                        phase=phase,
+                        answers=[cid],
+                    )  # fmt: skip
+                )
+        if i in withdrawn and not any(a["action"] == "withdraw" for a in mine):
+            turns.append(
+                _turn(
+                    f"{role}-r{rnd}-w{i}",
+                    role,
+                    rnd,
+                    "concede",
+                    "Withdrew this hypothesis.",
+                    about=_idea(role, i),
+                    phase=phase,
+                )  # fmt: skip
+            )
+        if i in revised:
+            rewrites = [a for a in mine if a["action"] == "revise"]
+            ids = [_challenge_id(rnd, a) for a in rewrites]
+            turns.append(
+                own(
+                    i,
+                    f"{role}-r{rnd}-h{i}",
+                    "refine",
+                    reply_to=ids[0] if ids else None,
+                    answers=ids,
+                    note=" ".join(str(a["text"]) for a in rewrites) or None,
+                )  # fmt: skip
+            )
+    turns += [
+        own(i, f"{role}-r{rnd}-h{i}", "propose") for i in doc.get("added") or [] if i in numbers
+    ]
     return turns
 
 
@@ -999,7 +1154,63 @@ def _hypothesis_payload(h: dict[str, Any]) -> dict[str, Any]:
         "conditions": h.get("conditions"),
         "limitations": h.get("limitations"),
         "risk": h.get("risk"),
+        "tension_ids": h.get("tension_ids") or [],
+        # The debate candidates it is built from, as their threads (T1, M2).
+        "from": [_candidate_thread(c) for c in h.get("from") or []],
+        "contested": [_objection_payload(o) for o in h.get("contested") or []],
+        "caveats": [_objection_payload(o) for o in h.get("caveats") or []],
+        **({"kept_by_reviewer": h["kept_by_reviewer"]} if h.get("kept_by_reviewer") else {}),
     }
+
+
+def _candidate_thread(candidate: str) -> str:
+    """``innovator-2`` (a debate candidate) as its thread on the Platform, ``T2``."""
+    role, _, number = candidate.rpartition("-")
+    return _idea(role, int(number)) if number.isdigit() else candidate
+
+
+def _objection_payload(o: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "by": _ROLE_ACTORS.get(str(o.get("from")), "skeptic"),
+        "about": _candidate_thread(str(o.get("candidate", ""))),
+        "severity": o.get("severity"),
+        "flaw": o.get("flaw"),
+        "field": o.get("field"),
+        "card_id": o.get("card_id"),
+        "text": _named(str(o.get("text") or "")),
+    }
+
+
+def held_back_ids(art: ArtifactStore) -> dict[str, str]:
+    """Thread id (T2) of each held-back candidate of the current set -> its engine id."""
+    if not art.exists(8, "hypotheses.json"):
+        return {}
+    doc = art.read_json(8, "hypotheses.json")
+    return {
+        _candidate_thread(str(b["candidate"])): str(b["candidate"])
+        for b in doc.get("held_back") or []
+    }
+
+
+def _held_back_events(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Each held-back candidate as an idea set aside, with the objection that keeps it out."""
+    out = []
+    for b in doc.get("held_back") or []:
+        first = (b.get("objections") or [{}])[0]
+        who = _role_name(str(first.get("from", "")))
+        flaw = str(first.get("flaw") or "fatal").replace("_", " ")
+        out.append(
+            (
+                "idea.set_aside",
+                {
+                    "idea_id": _candidate_thread(str(b["candidate"])),
+                    "statement": _named(str(b["hypothesis"].get("statement", ""))),
+                    "reason": f"Held back: the {who}'s objection stands ({flaw}). "
+                    + _named(str(first.get("text") or "")),
+                },
+            )
+        )
+    return out
 
 
 def _content_stage8(art: ArtifactStore, flags: Flags) -> StepEvents:
@@ -1010,6 +1221,7 @@ def _content_stage8(art: ArtifactStore, flags: Flags) -> StepEvents:
         "write": [
             ("hypothesis.drafted", {"hypothesis": _hypothesis_payload(h)}) for h in hypotheses
         ]
+        + _held_back_events(doc)
         + [
             (
                 "rule.checked",
@@ -1210,9 +1422,16 @@ def step_note(art: ArtifactStore, step_id: str) -> str | None:
         return _screen_note(art, step_id)
     if step_id == "extract":
         meta = art.read_json(6, "knowledge_meta.json")
-        skipped = len(meta.get("skipped") or [])
-        tail = f"; {_plural(skipped, 'paper')} had no abstract" if skipped else ""
-        return f"{_plural(meta['cards'], 'knowledge card')} from abstracts{tail}."
+        skipped = meta.get("skipped") or []
+        no_abstract = sum(1 for s in skipped if s.get("reason") == "no abstract available")
+        unquoted = len(skipped) - no_abstract
+        tail = f"; {_plural(no_abstract, 'paper')} had no abstract" if no_abstract else ""
+        if unquoted:
+            tail += (
+                f"; {_plural(unquoted, 'paper')} gave no card the abstract's own words could back"
+            )
+        quoted = " quoted from the abstracts" if meta.get("quoted") else " from abstracts"
+        return f"{_plural(meta['cards'], 'knowledge card')}{quoted}{tail}."
     if step_id == "cluster":
         syn = art.read_json(7, "synthesis.json")
         aside = sum(len(a["card_ids"]) for a in _set_aside(syn))
@@ -1226,16 +1445,48 @@ def step_note(art: ArtifactStore, step_id: str) -> str | None:
         proposals = [t for t in turns if t["round"] == 0]
         roles = {t["role"] for t in proposals}
         rounds = {t["round"] for t in turns if t["round"] > 0 and t["role"] != "judge"}
-        debated = f", then answered each other in {_plural(len(rounds), 'round')}" if rounds else ""
+        challenged = sum(
+            1 for t in turns if t["stance"] == "challenge" and t.get("phase") != "review"
+        )
+        answered = len(
+            {c for t in turns if t.get("phase") == "answer" for c in t.get("answers") or []}
+        )
+        reviews = [t for t in turns if t.get("phase") == "review" and t.get("answers")]
+        resolved = sum(1 for t in reviews if t["stance"] == "concede")
+        tally = f" ({challenged} challenged, {answered} answered" if challenged else ""
+        if reviews:
+            tally += f", {resolved} resolved on review, {len(reviews) - resolved} still standing"
+        tally += ")" if challenged else ""
+        debated = (
+            f", then answered each other in {_plural(len(rounds), 'round')}{tally}"
+            if rounds
+            else ""
+        )
         return (
             f"{_plural(len(roles), 'perspective')} proposed "
             f"{_plural(len(proposals), 'hypothesis', 'hypotheses')}{debated}."
         )
     if step_id == "write":
-        count = len(art.read_json(8, "hypotheses.json")["hypotheses"])
+        doc = art.read_json(8, "hypotheses.json")
+        hyps = doc["hypotheses"]
+        settled = sorted({t for h in hyps for t in h.get("tension_ids") or []})
+        still = doc.get("open_tensions") or []
+        tail = ""
+        contested = [h["id"] for h in hyps if h.get("contested")]
+        if contested:
+            tail += f"; contested: {', '.join(contested)}"
+        if doc.get("held_back"):
+            tail += (
+                f"; {_plural(len(doc['held_back']), 'candidate')} held back by a fatal objection"
+            )
+        if settled:
+            names = ", ".join(settled)
+            tail += f"; {_plural(len(settled), 'tension')} of the literature settled ({names})"
+        if still:
+            tail += f"; left open: {', '.join(still)}"
         return (
-            f"{_plural(count, 'hypothesis', 'hypotheses')}, each with a result that would "
-            "prove it wrong."
+            f"{_plural(len(hyps), 'hypothesis', 'hypotheses')}, each with a result that would "
+            f"prove it wrong{tail}."
         )
     if step_id in ("questions", "foundation", "reasoning", "contribution"):
         return _map_note(art, step_id)
@@ -1245,7 +1496,10 @@ def step_note(art: ArtifactStore, step_id: str) -> str | None:
         rows = report.get("per_hypothesis", [])
         similar = [float((r.get("closest_paper") or {}).get("similarity", 0)) for r in rows]
         novel = sum(1 for value in similar if value < threshold)
-        return f"{novel} of {len(rows)} look new against the papers found (a heuristic check)."
+        return (
+            f"{novel} of {len(rows)} have no close match among the papers found "
+            "(word overlap, a heuristic, not proof of novelty)."
+        )
     return None
 
 
@@ -1364,6 +1618,8 @@ def gate_spec(mode: str, data: dict[str, Any], art: ArtifactStore) -> dict[str, 
             }
         )
         return base
+    if kind == gates.HYPOTHESES:
+        return {**base, **_hypotheses_gate(mode, data)}
     goal = data.get("goal", {})
     questions = data.get("sub_questions", [])
     evaluation = data.get("topic_evaluation", {})
@@ -1405,10 +1661,70 @@ def gate_spec(mode: str, data: dict[str, Any], art: ArtifactStore) -> dict[str, 
     return base
 
 
+def _hypotheses_gate(mode: str, data: dict[str, Any]) -> dict[str, Any]:
+    hypotheses = data.get("hypotheses", [])
+    held = data.get("held_back", [])
+    contested = [h["id"] for h in hypotheses if h.get("contested")]
+    summary = [f"{_plural(len(hypotheses), 'hypothesis', 'hypotheses')} in the set, each built "
+               "from debate candidates that survived the challenges"]  # fmt: skip
+    if contested:
+        summary.append(
+            f"{', '.join(contested)} contested: a fatal objection to what "
+            f"{'it is' if len(contested) == 1 else 'they are'} built from still stands"
+        )
+    if held:
+        summary.append(
+            f"{_plural(len(held), 'candidate')} held back by a fatal objection; you can keep one "
+            "anyway, and the objection stays on record"
+        )
+    if data.get("open_tensions"):
+        summary.append(f"Tensions left open: {', '.join(data['open_tensions'])}")
+    return {
+        "title": "Approve the hypotheses",
+        "why": (
+            f"In {mode.title()} mode you decide what goes forward: the debate can flag a claim "
+            "wrongly, and every hypothesis is mapped and tested from here."
+        ),
+        "summary": summary,
+        "options": [
+            {
+                "id": "approve",
+                "label": f"Keep all {len(hypotheses)}",
+                "description": "Approve the set as the debate left it.",
+                "leads_to": "The argument map is drawn from these hypotheses",
+                "confirm_label": "Approve the hypotheses",
+                "recommended": True,
+            },
+            {
+                "id": "drop",
+                "label": "Change the set first" if held else "Remove some first",
+                "description": (
+                    "Click hypotheses to leave them out, or held-back ones to keep them."
+                    if held
+                    else "Click hypotheses to leave them out."
+                ),
+                "leads_to": "Removed ones are not mapped; kept ones stay marked contested",
+                "confirm_label": "Choose what to change",
+            },
+            {
+                "id": "reject",
+                "label": "Write a new set",
+                "description": "Reject the set; the perspectives debate again with your note.",
+                "leads_to": "Stage 8 runs again with your note as feedback",
+                "confirm_label": "Reject and hypothesize again",
+            },
+        ],
+        "droppable": [h["id"] for h in hypotheses],
+        "keepable": [_candidate_thread(str(b["candidate"])) for b in held],
+        "hypotheses": hypotheses,
+        "held_back": [{**b, "thread": _candidate_thread(str(b["candidate"]))} for b in held],
+    }
+
+
 def option_for(answer: dict[str, Any]) -> str:
     if answer.get("decision") == gates.REJECT:
         return "reject"
-    return "drop" if answer.get("dropped") else "approve"
+    return "drop" if answer.get("dropped") or answer.get("kept") else "approve"
 
 
 # ---------------------------------------------------------------------------
@@ -1557,6 +1873,8 @@ _PROGRESS_STEP = {
     "card": "extract",
     "perspectives_plan": "debate",
     "perspective": "debate",
+    "critique": "debate",
+    "review": "debate",
     "judged": "debate",
     "merge": "write",
     "novelty": "check",
@@ -1612,6 +1930,8 @@ def _streamed_ids(data: dict[str, Any]) -> list[str]:
         return [f"card:{data['card_id']}"]
     if kind == "perspective":  # every turn of that perspective in that round
         return [f"turns:{data['role']}-r{int(data.get('round', 0))}"]
+    if kind in ("critique", "review"):  # its critiques of the others, or its review, that round
+        return [f"turns:{data['role']}-r{int(data.get('round', 0))}-{kind}"]
     if kind == "judged":
         return ["turn:judge"]
     return []
@@ -1650,10 +1970,7 @@ def _trim(
         ]
     elif stage == 8:
         content["debate"] = [
-            e
-            for e in content.get("debate", [])
-            if f"turn:{e[1]['turn']['id']}" not in ids
-            and f"turns:{e[1]['turn']['role']}-r{e[1]['turn']['round']}" not in ids
+            e for e in content.get("debate", []) if not ({_turn_key(e[1]["turn"])} & ids)
         ]
         if "merge" in kinds:
             done.add("debate")
@@ -1662,6 +1979,15 @@ def _trim(
             done.add("write")
             started = "check"
     return started, done
+
+
+def _turn_key(turn: dict[str, Any]) -> str:
+    """The progress id that sent a turn: its own id (the judge) or its perspective's round and,
+    for a critique, the phase."""
+    if turn["id"] == "judge":
+        return "turn:judge"
+    phase = f"-{turn['phase']}" if turn.get("phase") in ("critique", "review") else ""
+    return f"turns:{turn['role']}-r{turn['round']}{phase}"
 
 
 def _on_stage_progress(view: RunView, event: Event) -> list[Envelope]:
@@ -1844,6 +2170,41 @@ def _progress_perspectives_plan(p: _Progress, data: dict[str, Any]) -> list[Enve
     return [p.say(f"{who} proposing hypotheses from the gaps.")]
 
 
+def _progress_critique(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    name = str(data.get("file", ""))
+    if not p.art.exists(8, name):
+        return []
+    doc = p.art.read_json(8, name)
+    stances = [r.get("stance") for r in doc.get("responses") or []]
+    who = _role_name(str(doc["role"]))
+    said = (
+        f"challenged {_plural(stances.count('challenge'), 'hypothesis', 'hypotheses')} and "
+        f"conceded {stances.count('concede')} in round {int(doc.get('round', 0))}"
+    )
+    return [*(p.env(*t) for t in _turns_of(doc)), p.say(f"The {who} {said}.")]
+
+
+def _progress_review(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
+    name = str(data.get("file", ""))
+    if not p.art.exists(8, name):
+        return []
+    doc = p.art.read_json(8, name)
+    verdicts = [(r.get("review") or {}).get("verdict") for r in doc.get("reviews") or []]
+    fatal = sum(
+        1
+        for r in doc.get("reviews") or []
+        if (r.get("review") or {}).get("verdict") == "stands" and r.get("severity") == "fatal"
+    )
+    who = _role_name(str(doc["role"]))
+    said = (
+        f"reviewed {_plural(len(verdicts), 'answer')}: {verdicts.count('resolved')} resolved, "
+        f"{verdicts.count('stands')} still standing ({fatal} fatal)"
+    )
+    if doc.get("added"):
+        said += f", and examined {_plural(len(doc['added']), 'new hypothesis', 'new hypotheses')}"
+    return [*(p.env(*t) for t in _turns_of(doc)), p.say(f"The {who} {said}.")]
+
+
 def _progress_perspective(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
     name = str(data.get("file", ""))
     if not p.art.exists(8, name):
@@ -1852,6 +2213,13 @@ def _progress_perspective(p: _Progress, data: dict[str, Any]) -> list[Envelope]:
     rnd = int(doc.get("round", 0))
     if rnd == 0:
         what = f"proposed {_plural(len(doc.get('hypotheses') or []), 'hypothesis', 'hypotheses')}"
+    elif doc.get("phase") == "answer":
+        actions = [a.get("action") for a in doc.get("answers") or []]
+        what = (
+            f"answered {_plural(len(actions), 'challenge')} in round {rnd}: "
+            f"{actions.count('revise')} revised, {actions.count('defend')} defended, "
+            f"{actions.count('withdraw')} withdrawn"
+        )
     else:
         stances = [r.get("stance") for r in doc.get("responses") or []]
         parts = [
@@ -1902,6 +2270,8 @@ _PROGRESS_HANDLERS: dict[str, Callable[[_Progress, dict[str, Any]], list[Envelop
     "card": _progress_card,
     "perspectives_plan": _progress_perspectives_plan,
     "perspective": _progress_perspective,
+    "critique": _progress_critique,
+    "review": _progress_review,
     "judged": _progress_judged,
     "merge": _progress_merge,
     "novelty": _progress_novelty,
@@ -1931,9 +2301,28 @@ def _on_stage_failed(view: RunView, event: Event) -> list[Envelope]:
     return []
 
 
+def gate_summary(kind: str, option: str, dropped: list[str], kept: list[str]) -> str:
+    """The run studio's one-line record of a gate answer."""
+    if option == "reject":
+        return {
+            gates.SCREEN: "Asked for a new search.",
+            gates.HYPOTHESES: "Asked for a new set of hypotheses.",
+        }.get(kind, "Asked for new scoping.")
+    noun = {gates.SCREEN: "shortlist", gates.HYPOTHESES: "hypotheses"}.get(kind, "scope")
+    item = "paper" if kind == gates.SCREEN else "hypothesis"
+    parts = []
+    if dropped:
+        many = "papers" if kind == gates.SCREEN else "hypotheses"
+        parts.append(f"without {_plural(len(dropped), item, many)}")
+    if kept:
+        parts.append(f"keeping {', '.join(kept)} despite the objection")
+    return f"Approved the {noun}{' ' + ' and '.join(parts) if parts else ''}."
+
+
 def _on_gate_opened(view: RunView, event: Event) -> list[Envelope]:
     spec = gate_spec(view.flags.mode, event.data, view.artifacts)
     group = _BY_STAGE[int(event.stage or 0)]
+    spec["stage_key"] = group.key  # where the platform files the answer
     step = f"{spec['kind']}_gate"
     return [
         _env(
@@ -1949,14 +2338,14 @@ def _on_gate_resolved(view: RunView, event: Event) -> list[Envelope]:
     kind = event.data["kind"]
     option = option_for(event.data)
     dropped = list(event.data.get("dropped") or [])
-    noun = "shortlist" if kind == gates.SCREEN else "scope"
-    if option == "reject":
-        summary = "Asked for a new search." if kind == gates.SCREEN else "Asked for new scoping."
-    elif dropped:
-        summary = f"Approved the {noun} without {len(dropped)} papers."
-    else:
-        summary = f"Approved the {noun}."
-    answer = {"option_id": option, "dropped": dropped, "note": event.data.get("note") or None}
+    kept = list(event.data.get("kept") or [])
+    summary = gate_summary(kind, option, dropped, [_candidate_thread(k) for k in kept])
+    answer = {
+        "option_id": option,
+        "dropped": dropped,
+        "kept": [_candidate_thread(k) for k in kept],
+        "note": event.data.get("note") or None,
+    }
     out = [
         _env(
             "gate.resolved",
@@ -1967,6 +2356,16 @@ def _on_gate_resolved(view: RunView, event: Event) -> list[Envelope]:
     ]
     if option == "reject":
         return out
+    if kind == gates.HYPOTHESES and kept and view.artifacts.exists(8, "hypotheses.json"):
+        doc = view.artifacts.read_json(8, "hypotheses.json")
+        for h in doc["hypotheses"]:
+            if h.get("kept_by_reviewer"):
+                out += [
+                    _env("hypothesis.drafted", {"hypothesis": _hypothesis_payload(h)},
+                         stage_key=group.key, actor="pi"),
+                    _env("hypothesis.selected", {"hypothesis_id": h["id"],
+                         "override_note": h["kept_by_reviewer"]}, stage_key=group.key, actor="pi"),
+                ]  # fmt: skip
     if kind == gates.SCOPE:
         out.append(
             _env(

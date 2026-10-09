@@ -161,5 +161,10 @@ async def test_gate_answers_continue_delivery_in_sequence(tmp_path: Path) -> Non
         gate_id = opened[0]["payload"]["gate_id"]
         await h.client.post(f"/runs/{run_id}/gates/{gate_id}", json={"option_id": "approve"})
         await h.settle()
+        opened = [e for e in platform.received if e["type"] == "gate.opened"]
+        assert [e["payload"]["kind"] for e in opened] == ["screen", "hypotheses"]
+        gate_id = opened[-1]["payload"]["gate_id"]
+        await h.client.post(f"/runs/{run_id}/gates/{gate_id}", json={"option_id": "approve"})
+        await h.settle()
         assert platform.types[-1] == "run.completed"
         assert platform.seqs == list(range(1, len(platform.seqs) + 1))

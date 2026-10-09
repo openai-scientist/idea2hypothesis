@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -30,10 +31,17 @@ DECISIONS = (
 )  # fmt: skip
 CARD_FIELDS = ("problem", "method", "data", "metrics", "findings", "limitations")
 CARD_CONTENT_FIELDS = ("problem", "method", "findings", "limitations")
+#: Cards from this schema on back every filled field with quotes from the abstract.
+QUOTED_CARD_SCHEMA = 2
+MAX_QUOTES_PER_FIELD = 3
+MIN_QUOTE_WORDS = 4
 MIN_SUB_QUESTIONS = 3
 MIN_STRATEGIES = 2
 MIN_GAPS = 2
 MIN_HYPOTHESES = 2
+#: Syntheses from this schema on give each tension an id and the cards on each of its two sides.
+SIDED_TENSION_SCHEMA = 2
+TENSION_ID = re.compile(r"^X\d+$")
 _CONDITION_WORDS = re.compile(
     r"\b(if|when|unless|exceed\w*|below|above|less|greater|fail\w*|interval|threshold|bound|limit"
     r"|zero|ci)\b|[<>=≥≤≠]|\d",
@@ -82,6 +90,74 @@ def _normalise_text(value: str) -> str:
 
 def card_id_for(paper_id: str) -> str:
     return f"card-{paper_id}"
+
+
+_QUOTE_FOLD = str.maketrans(
+    {
+        "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'", "\u2032": "'",
+        "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u2033": '"',
+        "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-",
+        "\u2212": "-", "\u00a0": " ",
+    }
+)  # fmt: skip
+
+
+def normalise_quote(text: str) -> str:
+    """The form a quote and its abstract are compared in.
+
+    Only differences that carry no meaning are removed: Unicode width and ligature forms, curly
+    quotes and dash variants, HTML/JATS tags some sources leave in abstracts, letter case, runs of
+    white space, and quote marks or ellipses wrapped around the passage. Words, numbers and their
+    order must match exactly.
+    """
+    text = unicodedata.normalize("NFKC", text).translate(_QUOTE_FOLD)
+    text = re.sub(r"<[^>]{1,40}>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip().casefold()
+    return text.strip(" \"'.…").strip()
+
+
+def quote_problems(field_name: str, quotes: Any, abstract: str) -> list[str]:
+    """Why the quotes given for one card field do not back it (empty when they do)."""
+    if not isinstance(quotes, list) or not quotes:
+        return [f"{field_name} is filled but has no quote from the abstract"]
+    if len(quotes) > MAX_QUOTES_PER_FIELD:
+        return [f"{field_name} has {len(quotes)} quotes; give at most {MAX_QUOTES_PER_FIELD}"]
+    source = normalise_quote(abstract)
+    problems: list[str] = []
+    for quote in quotes:
+        if not _text(quote):
+            problems.append(f"{field_name} has an empty quote")
+            continue
+        norm = normalise_quote(quote)
+        if len(norm.split()) < MIN_QUOTE_WORDS:
+            problems.append(
+                f"{field_name} quote {quote[:60]!r} is shorter than {MIN_QUOTE_WORDS} words"
+            )
+        elif norm not in source:
+            problems.append(
+                f"{field_name} quote {quote[:80]!r} is not in the abstract word for word"
+            )
+    return problems
+
+
+def check_card_quotes(data: Any, abstract: str) -> Findings:
+    """Every filled card field is backed by quotes found in the abstract; null fields have none."""
+    f = Findings()
+    if not isinstance(data, dict):
+        f.error("the card must be a JSON object")
+        return f
+    quotes = data.get("quotes")
+    if not f.require(isinstance(quotes, dict), "the card needs a 'quotes' object"):
+        return f
+    for key in quotes:
+        f.require(key in CARD_FIELDS, f"quotes has an unknown field {key!r}")
+    for key in CARD_FIELDS:
+        if _text(data.get(key)):
+            for problem in quote_problems(key, quotes.get(key), abstract):
+                f.error(problem)
+        elif quotes.get(key):
+            f.error(f"{key} is null but has quotes; fill it or drop its quotes")
+    return f
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +363,8 @@ def check_screen(
     return f
 
 
-def check_card(card: Any, shortlist_ids: set[str]) -> Findings:
+def check_card(card: Any, shortlist_ids: set[str], abstract: str | None = None) -> Findings:
+    """One stored card. From schema 2 on, its quotes must be found in ``abstract``."""
     f = Findings()
     if not f.require(isinstance(card, dict), "card must be an object"):
         return f
@@ -304,6 +381,12 @@ def check_card(card: Any, shortlist_ids: set[str]) -> Findings:
     for key in CARD_FIELDS:
         present = key in card and (card[key] is None or _text(card[key]))
         f.require(present, f"card {cid}: field {key} must be text or null")
+    if int(card.get("schema_version") or 1) >= QUOTED_CARD_SCHEMA:
+        if abstract is None:
+            f.error(f"card {cid}: the abstract of paper {pid} is not available to check quotes")
+        else:
+            for problem in check_card_quotes(card, abstract).errors:
+                f.error(f"card {cid}: {problem}")
     return f
 
 
@@ -326,6 +409,62 @@ def _set_aside_ids(f: Findings, raw: Any, known_cards: set[str]) -> list[str]:
     return ids
 
 
+def check_tensions(raw: Any, known_cards: set[str], cluster_ids: set[str]) -> Findings:
+    """Each tension has an id, the clusters it lies between, and two sides that each state a
+    finding and list the cards behind it; no card sits on both sides."""
+    f = Findings()
+    if raw is None or raw == []:
+        return f
+    if not f.require(isinstance(raw, list), "tensions must be a list"):
+        return f
+    seen: set[str] = set()
+    for i, tension in enumerate(raw):
+        if not f.require(isinstance(tension, dict), f"tensions[{i}] must be an object"):
+            continue
+        tid = tension.get("id")
+        if f.require(
+            isinstance(tid, str) and TENSION_ID.match(tid), f"tensions[{i}].id must look like X1"
+        ):
+            f.require(tid not in seen, f"duplicate tension id {tid}")
+            seen.add(str(tid))
+        tag = f"tension {tid}" if isinstance(tid, str) else f"tensions[{i}]"
+        f.require(_text(tension.get("text")), f"{tag}: text is required")
+        between = tension.get("between")
+        if f.require(_str_list(between), f"{tag}: between must list the clusters it lies between"):
+            unknown = sorted(set(between) - cluster_ids)
+            f.require(not unknown, f"{tag}: between references unknown clusters {unknown}")
+        sides = tension.get("sides")
+        if not f.require(
+            isinstance(sides, list) and len(sides) == 2, f"{tag}: sides must hold exactly two sides"
+        ):
+            continue
+        cards: list[set[str]] = []
+        for j, side in enumerate(sides, 1):
+            ok = (
+                isinstance(side, dict)
+                and _text(side.get("claim"))
+                and _str_list(side.get("card_ids"))
+            )
+            if not f.require(ok, f"{tag}: side {j} needs a claim and at least one card"):
+                cards.append(set())
+                continue
+            unknown = sorted(set(side["card_ids"]) - known_cards)
+            f.require(not unknown, f"{tag}: side {j} references unknown cards {unknown}")
+            cards.append(set(side["card_ids"]))
+        both = sorted(cards[0] & cards[1])
+        f.require(not both, f"{tag}: cards {both} are on both sides")
+    return f
+
+
+def tension_ids(synthesis: dict[str, Any]) -> set[str]:
+    """Ids of the synthesis tensions a hypothesis may settle (none in syntheses before ids)."""
+    return {
+        str(t["id"])
+        for t in synthesis.get("tensions") or []
+        if isinstance(t, dict) and isinstance(t.get("id"), str) and TENSION_ID.match(t["id"])
+    }
+
+
 def check_synthesis(
     synthesis: Any,
     known_sq: set[str],
@@ -333,14 +472,17 @@ def check_synthesis(
     source_text: str = "",
     *,
     every_card: bool = False,
+    sided_tensions: bool = False,
 ) -> Findings:
     """``every_card``: each known card is in a cluster or set aside with a reason (stage 7
-    accounts for every card it sent)."""
+    accounts for every card it sent). ``sided_tensions``: tensions carry ids and two sides of
+    cards (see :func:`check_tensions`)."""
     f = Findings()
     if not f.require(isinstance(synthesis, dict), "synthesis must be an object"):
         return f
     clusters = synthesis.get("clusters")
     placed: list[str] = []
+    cluster_ids: set[str] = set()
     if f.require(isinstance(clusters, list) and clusters, "at least one cluster is required"):
         for i, cluster in enumerate(clusters):
             ok = (
@@ -350,6 +492,7 @@ def check_synthesis(
             )
             if not f.require(ok, f"clusters[{i}] needs id and title"):
                 continue
+            cluster_ids.add(str(cluster["id"]))
             ids = cluster.get("card_ids")
             if f.require(_str_list(ids), f"clusters[{i}] needs card_ids"):
                 f.require(set(ids) <= known_cards, f"clusters[{i}] references unknown cards")
@@ -365,6 +508,8 @@ def check_synthesis(
     twice = sorted({c for c in placed if placed.count(c) > 1})
     if twice:
         f.warn(f"cards placed more than once: {', '.join(twice)}")
+    if sided_tensions:
+        f.extend(check_tensions(synthesis.get("tensions"), known_cards, cluster_ids))
     gaps = synthesis.get("gaps")
     if f.require(
         isinstance(gaps, list) and len(gaps) >= MIN_GAPS,
@@ -400,8 +545,19 @@ def normalise_prediction(value: Any) -> Any:
     return mapping.get(compact, value)
 
 
-def check_hypotheses(data: Any, valid_gaps: set[str], valid_refs: set[str]) -> Findings:
-    """Validate the hypothesis list (``data`` is the parsed ``hypotheses.json`` object)."""
+def check_hypotheses(
+    data: Any,
+    valid_gaps: set[str],
+    valid_refs: set[str],
+    valid_tensions: set[str] | None = None,
+) -> Findings:
+    """Validate the hypothesis list (``data`` is the parsed ``hypotheses.json`` object).
+
+    ``valid_tensions``: the synthesis tension ids; each ``tension_ids`` entry must be one of them,
+    and when there are any, at least one hypothesis must settle one.
+    """
+    tensions = valid_tensions or set()
+    settled: set[str] = set()
     f = Findings()
     if not f.require(isinstance(data, dict), "hypotheses output must be an object"):
         return f
@@ -441,11 +597,25 @@ def check_hypotheses(data: Any, valid_gaps: set[str], valid_refs: set[str]) -> F
             )
         lim = h.get("limitations")
         f.require(_text(lim) or _str_list(lim), f"{tag}: limitations are required")
+        named = h.get("tension_ids")
+        if named not in (None, []) and f.require(
+            _str_list(named), f"{tag}: tension_ids must be a list of tension ids"
+        ):
+            unknown = sorted(set(named) - tensions)
+            f.require(
+                not unknown,
+                f"{tag}: tension_ids {unknown} are not tensions of the synthesis "
+                f"(allowed: {sorted(tensions) or 'none'})",
+            )
+            settled |= set(named) & tensions
+    if tensions and not settled:
+        f.error(
+            f"the synthesis lists tensions {sorted(tensions)}; at least one hypothesis must settle "
+            "one of them and name it in tension_ids"
+        )
     _check_distinct(f, items, "novelty")
     _check_distinct(f, items, "rationale")
-    predictions = [h.get("prediction") for h in items if isinstance(h, dict)]
-    if len(predictions) >= 3 and len(set(predictions)) == 1:
-        f.warn("all hypotheses predict the same direction; consider costs or interactions")
+    # The predicted directions follow the evidence; a set that all points one way is not a fault.
     return f
 
 
@@ -852,12 +1022,13 @@ def _v_literature_screen(ld: _Loader, f: Findings) -> None:
 def _v_knowledge_extract(ld: _Loader, f: Findings) -> None:
     shortlist = ld.jsonl(Stage.LITERATURE_SCREEN, "shortlist.jsonl")
     ids = {str(r["paper_id"]) for r in shortlist}
+    abstracts = {str(r["paper_id"]): str(r.get("abstract") or "") for r in shortlist}
     cards = _card_rows(ld)
     if not f.require(cards, "no knowledge cards were produced"):
         return
     seen_papers: set[str] = set()
     for card in cards:
-        f.extend(check_card(card, ids))
+        f.extend(check_card(card, ids, abstracts.get(str(card.get("paper_id")))))
         pid = str(card.get("paper_id"))
         f.require(pid not in seen_papers, f"more than one card for paper {pid}")
         seen_papers.add(pid)
@@ -879,7 +1050,12 @@ def _v_synthesis(ld: _Loader, f: Findings) -> None:
         return
     cards = _card_rows(ld)
     card_ids = {str(c.get("card_id")) for c in cards}
-    f.extend(check_synthesis(synthesis, _tree_ids(ld), card_ids, card_source_text(cards)))
+    sided = int(synthesis.get("schema_version") or 1) >= SIDED_TENSION_SCHEMA
+    f.extend(
+        check_synthesis(
+            synthesis, _tree_ids(ld), card_ids, card_source_text(cards), sided_tensions=sided
+        )
+    )
 
 
 def hypothesis_reference_sets(
@@ -906,7 +1082,7 @@ def _v_hypothesis_gen(ld: _Loader, f: Findings) -> None:
     if synthesis is None or data is None:
         return
     gaps, refs = hypothesis_reference_sets(synthesis, _card_rows(ld))
-    f.extend(check_hypotheses(data, gaps, refs))
+    f.extend(check_hypotheses(data, gaps, refs, tension_ids(synthesis)))
     if ld.art.exists(stage, "novelty_report.json"):
         report = ld.json(Stage.HYPOTHESIS_GEN, "novelty_report.json")
         f.require(

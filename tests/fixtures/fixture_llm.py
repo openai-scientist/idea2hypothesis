@@ -25,8 +25,10 @@ _MARKERS: list[tuple[str, str]] = [
     ("Screen every paper below", "literature_screen"),
     ("Extract a structured knowledge card", "knowledge_extract"),
     ("Produce a synthesis (topic clusters", "synthesis"),
-    ("Write the final set of 2-4 hypotheses", "hypothesis_gen"),
-    ("Then write your updated position", "debate_rebuttal"),
+    ("Write the final set of hypotheses", "hypothesis_gen"),
+    ("Examine the other perspectives' hypotheses point by point", "debate_critique"),
+    ("Answer each challenge to your position", "debate_answer"),
+    ("Review the answers to your challenges", "debate_review"),
     ("Score each perspective 1-10", "debate_judge"),
     ("Allowed evidence references", "perspective"),
     ("Judge how the evidence bears on each claim", "argument_map"),
@@ -53,6 +55,7 @@ class PromptInfo:
     system: str
     user: str
     index: int  # 0-based call number for this key
+    temperature: float | None = None  # as requested by the stage (None: the configured default)
 
     @property
     def topic(self) -> str:
@@ -101,7 +104,7 @@ class FixtureLLM:
         user = "\n".join(m.content for m in messages if m.role == "user")
         if len(messages) > 1:  # a repair round: classify by the original prompt
             user = messages[0].content
-        info = self._classify(system or "", user)
+        info = self._classify(system or "", user, temperature)
         self.calls.append(info)
         if self.on_call is not None:
             result = self.on_call(info)
@@ -122,11 +125,11 @@ class FixtureLLM:
     def count(self, key: str) -> int:
         return sum(1 for c in self.calls if c.key == key)
 
-    def _classify(self, system: str, user: str) -> PromptInfo:
+    def _classify(self, system: str, user: str, temperature: float | None = None) -> PromptInfo:
         key = next((k for marker, k in _MARKERS if marker in user), "unknown")
         index = self._counts.get(key, 0)
         self._counts[key] = index + 1
-        return PromptInfo(key, system, user, index)
+        return PromptInfo(key, system, user, index, temperature)
 
     def _payload(self, info: PromptInfo) -> Any:
         if info.key in self.overrides:
@@ -241,16 +244,23 @@ class FixtureLLM:
         return {"screened": screened}
 
     def _default_knowledge_extract(self, info: PromptInfo) -> dict[str, Any]:
+        # Fixture abstracts read "We study <title> using a controlled design with participants
+        # and report effects on outcomes (study N)."; every field quotes a span of it.
         paper = info.section_json("Paper:\n")
+        abstract = paper["abstract"]
+        problem = abstract.split(" using ", 1)[0]
         return {
             "problem": f"Addresses: {paper['title']}",
             "method": "Controlled study with participants",
             "data": None,
             "metrics": None,
             "findings": "Reports effects on outcomes",
-            "limitations": "Abstract does not state limitations in detail"
-            if info.index % 2
-            else None,
+            "limitations": None,
+            "quotes": {
+                "problem": [problem],
+                "method": ["using a controlled design with participants"],
+                "findings": ["report effects on outcomes"],
+            },
         }
 
     def _default_synthesis(self, info: PromptInfo) -> dict[str, Any]:
@@ -276,7 +286,7 @@ class FixtureLLM:
                     "card_ids": sorted_ids[half:] or sorted_ids[:1],
                 },
             ],  # fmt: skip
-            "tensions": [{"between": ["C1", "C2"], "text": "duration versus regularity"}],
+            "tensions": self._tensions(sorted_ids[:half], sorted_ids[half:]),
             "gaps": [
                 {
                     "id": "G1",
@@ -301,11 +311,32 @@ class FixtureLLM:
             else [],
         }
 
+    @staticmethod
+    def _tensions(first: list[str], second: list[str]) -> list[dict[str, Any]]:
+        """One tension between the two clusters, one card on each side (none without two)."""
+        other = [c for c in second if c not in first[:1]]
+        if not first or not other:
+            return []
+        sides = [
+            {"claim": "More sleep goes with higher scores", "card_ids": first[:1]},
+            {"claim": "Regular timing matters more than length", "card_ids": other[:1]},
+        ]
+        return [
+            {
+                "id": "X1",
+                "between": ["C1", "C2"],
+                "text": "duration versus regularity",
+                "sides": sides,
+            }
+        ]
+
     def _hypotheses(self, info: PromptInfo, tag: str, count: int) -> list[dict[str, Any]]:
         gaps = info.list_after("Allowed gap ids:")
         match = re.search(r"Allowed evidence references[^:\n]*:\s*(.+)", info.user)
         refs = [r.strip() for r in match.group(1).split(",")] if match else []
         predictions = ["> 0", "< 0", "≠ 0", "> 0"]
+        # Candidates of the debate argue from other mechanisms than the final set's first ones.
+        shift = 0 if tag == "final" else 2
         items = []
         for i in range(count):
             items.append(
@@ -329,35 +360,88 @@ class FixtureLLM:
                     ),
                     "limitations": ["observational data"],
                     "rationale": (
-                        f"{_MECHANISMS[i % len(_MECHANISMS)]} explains the effect "
+                        f"{_MECHANISMS[(i + shift) % len(_MECHANISMS)]} explains the effect "
                         f"in variant {tag}{i}."
                     ),
                     "novelty": (
-                        f"{_GAPS[i % len(_GAPS)]} has not been tested in the {tag}{i} setting."
+                        f"{_GAPS[(i + shift) % len(_GAPS)]} has not been tested "
+                        f"in the {tag}{i} setting."
                     ),
                     "risk": "medium",
+                    # The first hypothesis settles the synthesis tension when there is one.
+                    "tension_ids": ["X1"] if i == 0 and '"id": "X1"' in info.user else [],
                 }
             )
         return items
 
     def _default_perspective(self, info: PromptInfo) -> dict[str, Any]:
-        return {"hypotheses": self._hypotheses(info, f"role{info.index}", 2)}
+        return {"hypotheses": self._hypotheses(info, f"role{info.index}", 3)}
 
-    def _default_debate_rebuttal(self, info: PromptInfo) -> dict[str, Any]:
+    def _default_debate_critique(self, info: PromptInfo) -> dict[str, Any]:
         others = re.findall(r"^### (\w+)$", info.user, re.MULTILINE)
         responses = [
-            {"to": others[0], "hypothesis": 1, "stance": "challenge", "text": "confounded by age"},
+            {
+                "to": others[0],
+                "hypothesis": 1,
+                "stance": "challenge",
+                "severity": "fatal",
+                "flaw": "unsupported",
+                "field": "statement",
+                "text": "confounded by age",
+            },  # fmt: skip
             {"to": others[-1], "hypothesis": 2, "stance": "concede", "text": "well grounded"},
             {"to": "nobody", "hypothesis": 1, "stance": "challenge", "text": "unusable"},
         ]
-        hypotheses = self._hypotheses(info, f"rebut{info.index}", 2)
-        return {"hypotheses": hypotheses, "responses": responses}
+        return {"responses": responses}
+
+    def _default_debate_answer(self, info: PromptInfo) -> dict[str, Any]:
+        """The first challenge is met with a rewrite, every other one is defended."""
+        own = info.user.split("numbered:\n", 1)[1].split("\n\nChallenges to your", 1)[0]
+        hyps = [
+            {"statement": "WITHDRAWN"} if part.strip().startswith("WITHDRAWN") else json.loads(part)
+            for part in re.split(r"^\d+\. ", own, flags=re.MULTILINE)[1:]
+        ]
+        answers = []
+        for n, k in re.findall(r"^(\d+)\. \(to your hypothesis (\d+)", info.user, re.MULTILINE):
+            n, k = int(n), int(k)
+            if n == 1:
+                hyps[k - 1] = {**hyps[k - 1], "statement": f"{hyps[k - 1]['statement']}, by age"}
+                answers.append(
+                    {"challenge": n, "action": "revise", "text": "age is now held fixed"}
+                )
+            else:
+                answers.append(
+                    {"challenge": n, "action": "defend", "text": "the cards adjust for it"}
+                )
+        return {"answers": answers, "hypotheses": hyps, "withdrawn": []}
+
+    def _default_debate_review(self, info: PromptInfo) -> dict[str, Any]:
+        """Answers resolve every objection, except that the contrarian keeps a caveat."""
+        section = info.user.split("numbered (each shows the hypothesis as it now reads):", 1)[1]
+        items = re.findall(r"^(\d+)\. Your challenge", section, re.MULTILINE)
+        keeps = "as the contrarian perspective" in info.system
+        reviews = [
+            {"item": int(n), "verdict": "stands", "severity": "caveat", "text": "age still varies"}
+            if keeps
+            else {"item": int(n), "verdict": "resolved", "text": "the answer deals with it"}
+            for n in items
+        ]
+        added = re.findall(r"^(\d+)\. \w+ hypothesis \d+:", info.user, re.MULTILINE)
+        concede = [{"item": int(n), "stance": "concede", "text": "sound"} for n in added]
+        return {"reviews": reviews, "added": concede}
 
     def _default_debate_judge(self, info: PromptInfo) -> dict[str, Any]:
         return {"rankings": [{"role": "any", "score": 7, "reason": "solid"}]}
 
     def _default_hypothesis_gen(self, info: PromptInfo) -> dict[str, Any]:
-        return {"hypotheses": self._hypotheses(info, "final", 3), "disagreements": ["effect size"]}
+        """Three hypotheses from the first candidates without a standing fatal objection."""
+        candidates = re.findall(r"^### ([a-z_]+-\d+) \[(\w+)\]", info.user, re.MULTILINE)
+        usable = [c for c, label in candidates if label != "FATAL"]
+        usable += [c for c, label in candidates if label == "FATAL"]
+        hypotheses = self._hypotheses(info, "final", 3)
+        for h, source in zip(hypotheses, usable, strict=False):
+            h["from"] = [source]
+        return {"hypotheses": hypotheses, "disagreements": ["effect size"]}
 
     def _default_argument_map(self, info: PromptInfo) -> dict[str, Any]:
         claims = info.section_json("Claims and their cards:\n", "Hypotheses:")

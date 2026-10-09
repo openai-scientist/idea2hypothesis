@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from idea2hypothesis.memory.ideation import IdeationMemory
@@ -22,7 +23,9 @@ async def test_debate_rounds_with_an_independent_reviewer(tmp_path: Path) -> Non
     result = await run_pipeline(request(), services)
 
     assert result.status is RunStatus.COMPLETED, result.error
-    assert llm.count("debate_rebuttal") == 3  # one per role
+    assert llm.count("debate_critique") == 3  # one per role
+    # only the perspectives that were challenged answer (the fixture challenges two of them)
+    assert llm.count("debate_answer") == 2
     assert reviewer.count("debate_judge") == 1 and llm.count("debate_judge") == 0
     art = services.store.artifacts(result.run_id)
     files = set(art.list_files(8))
@@ -49,11 +52,71 @@ async def test_debate_without_a_reviewer_warns_that_the_judge_is_not_independent
     assert any("not independent" in w for w in done[0].data["warnings"])
 
 
+async def test_a_withdrawn_hypothesis_leaves_the_debate_and_the_final_set(tmp_path: Path) -> None:
+    def withdraw_all(info: object) -> dict:
+        user = info.user  # type: ignore[attr-defined]
+        own = user.split("numbered:\n", 1)[1].split("\n\nChallenges to your", 1)[0]
+        hyps = [json.loads(p) for p in re.split(r"^\d+\. ", own, flags=re.MULTILINE)[1:]]
+        asked = re.findall(r"^(\d+)\. \(to your hypothesis (\d+)", user, re.MULTILINE)
+        answers = [{"challenge": int(n), "action": "withdraw", "text": "it cannot fail"}
+                   for n, _ in asked]  # fmt: skip
+        return {
+            "answers": answers,
+            "hypotheses": hyps,
+            "withdrawn": sorted({int(k) for _, k in asked}),
+        }
+
+    llm = FixtureLLM(overrides={"debate_answer": withdraw_all})
+    cfg = make_config(tmp_path, review={"mode": "auto"}, llm={"debate_rounds": 1})
+    services = make_services(tmp_path, llm=llm, config=cfg)
+    result = await run_pipeline(request(), services)
+
+    assert result.status is RunStatus.COMPLETED, result.error
+    art = services.store.artifacts(result.run_id)
+    record = art.read_json(8, "perspectives/debate_record.json")
+    assert record["withdrawn"] == {"innovator": [1], "pragmatist": [1]}
+    assert record["answers"]["innovator"] == {"revise": 0, "defend": 0, "withdraw": 2}
+    gone = [art.read_json(8, f"perspectives/{r}.json")["hypotheses"][0]["statement"]
+            for r in ("innovator", "pragmatist")]  # fmt: skip
+    kept = art.read_json(8, "perspectives/innovator.json")["hypotheses"][1]["statement"]
+    for key in ("debate_judge", "hypothesis_gen"):
+        prompt = [c for c in llm.calls if c.key == key][0].user
+        assert not any(g in prompt for g in gone) and kept in prompt, key
+
+
+async def test_tensions_left_open_are_reported_and_one_must_be_settled(tmp_path: Path) -> None:
+    def two_tensions(info: object) -> dict:
+        syn = FixtureLLM()._default_synthesis(info)  # type: ignore[arg-type]
+        x1 = syn["tensions"][0]
+        syn["tensions"].append({**x1, "id": "X2", "text": "self-report versus actigraphy"})
+        return syn
+
+    def unsettled(info: object) -> dict:
+        data = FixtureLLM()._default_hypothesis_gen(info)  # type: ignore[arg-type]
+        for h in data["hypotheses"]:
+            h["tension_ids"] = []
+        return data
+
+    llm = FixtureLLM(overrides={"synthesis": two_tensions, "hypothesis_gen": [unsettled]})
+    services = make_services(tmp_path, llm=llm, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+
+    assert result.status is RunStatus.COMPLETED, result.error
+    art = services.store.artifacts(result.run_id)
+    doc = art.read_json(8, "hypotheses.json")
+    assert doc["hypotheses"][0]["tension_ids"] == ["X1"] and doc["open_tensions"] == ["X2"]
+    assert "## Open tensions" in art.read_text(8, "hypotheses.md")
+    calls = [c for c in art.read_llm_calls(8, 1) if c["label"] == "hypothesis_gen"]
+    assert [c["outcome"] for c in calls] == ["rejected", "accepted"]
+    assert any("must settle one of them" in p for p in calls[0]["problems"])
+
+
 async def test_without_debate_there_are_no_rebuttals(tmp_path: Path) -> None:
     llm = FixtureLLM()
     services = make_services(tmp_path, llm=llm, review={"mode": "auto"})
     await run_pipeline(request(), services)
-    assert llm.count("debate_rebuttal") == 0 and llm.count("debate_judge") == 0
+    assert llm.count("debate_critique") == 0 and llm.count("debate_answer") == 0
+    assert llm.count("debate_judge") == 0
     assert llm.count("perspective") == 3
 
 
