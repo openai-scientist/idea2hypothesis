@@ -16,21 +16,16 @@ research:
   max_shortlist: 20             # read the 20 best-scored papers; 0 keeps all that clear both bars
 
 llm:
-  # AWS Bedrock (kept for switching back: uncomment these and comment out the router block below)
-  # provider: bedrock
-  # model: us.anthropic.claude-haiku-4-5-20251001-v1:0
-  # region: ""                   # falls back to AWS_REGION
-  # aws_profile: ""              # falls back to AWS_PROFILE / access keys in the environment
-  # OpenAI-compatible router (kept for switching back: uncomment these and comment out OpenRouter)
+  # AWS Bedrock; credentials come from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION in .env
+  provider: bedrock
+  model: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  region: ""                     # falls back to AWS_REGION
+  aws_profile: ""                # falls back to AWS_PROFILE / access keys in the environment
+  # OpenAI-compatible router (kept for switching back: uncomment these and comment out Bedrock)
   # provider: openai_compatible
   # base_url: https://9router.darrenak.id.vn/v1
   # api_key_env: I2H_LLM_API_KEY
   # model: scientrag-answer
-  # OpenRouter; the key is read from OPENROUTER_API_KEY in .env
-  provider: openai_compatible
-  base_url: https://openrouter.ai/api/v1
-  api_key_env: OPENROUTER_API_KEY
-  model: nvidia/nemotron-3-ultra-550b-a55b:free
   fallback_models: []
   timeout_sec: 120
   max_retries: 6                 # Bedrock per-minute quotas throttle bursts; back off
