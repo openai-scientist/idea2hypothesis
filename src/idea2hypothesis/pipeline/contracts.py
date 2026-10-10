@@ -34,7 +34,8 @@ CARD_FIELDS = ("problem", "method", "data", "metrics", "findings", "limitations"
 CARD_CONTENT_FIELDS = ("problem", "method", "findings", "limitations")
 #: Cards from this schema on back every filled field with quotes from the abstract.
 QUOTED_CARD_SCHEMA = 2
-MAX_QUOTES_PER_FIELD = 3
+#: An abstract may name each dataset or metric in its own sentence; joining them is not verbatim.
+MAX_QUOTES_PER_FIELD = 6
 MIN_QUOTE_WORDS = 4
 MIN_SUB_QUESTIONS = 3
 MIN_STRATEGIES = 2

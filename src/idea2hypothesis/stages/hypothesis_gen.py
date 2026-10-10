@@ -174,6 +174,21 @@ async def _generate_perspectives(
     return current
 
 
+#: Card fields a hypothesis is checked against: how the paper studied it, what it found, its limits.
+EVIDENCE_FIELDS = ("method", "findings", "limitations")
+MAX_EVIDENCE_CHARS = 600
+
+
+def _evidence_view(card: dict[str, Any]) -> dict[str, Any]:
+    view: dict[str, Any] = {
+        "card_id": card["card_id"], "title": card.get("title"), "year": card.get("year"),
+    }  # fmt: skip
+    for key in EVIDENCE_FIELDS:
+        if card.get(key):
+            view[key] = str(card[key])[:MAX_EVIDENCE_CHARS]
+    return view
+
+
 #: Why a candidate with no fatal objection standing is left out of the final set.
 NOT_USED_REASONS = ("duplicate", "over_limit")
 
@@ -379,6 +394,9 @@ async def run(ctx: StageContext) -> list[str]:
         ],
         "gaps": synthesis["gaps"],
         "prioritized_opportunities": synthesis.get("prioritized_opportunities", []),
+        # What each citable card reports: without it a hypothesis cannot be checked against the
+        # evidence it cites (already shown, or contradicted).
+        "cards": [_evidence_view(c) for c in cards],
     }
     variables: dict[str, Any] = {
         "topic": ctx.topic,

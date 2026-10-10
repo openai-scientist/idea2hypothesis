@@ -55,9 +55,16 @@ blocks:
       all; a new prediction the cards have not tested yet is NOT unsupported, since testing it
       is the point of the hypothesis), "unfalsifiable" (no result could show it wrong),
       "undecidable_test" (the proposed test cannot tell the claim from its alternative),
-      "already_established" (a card already shows it; give that card's id in "card_id"). Name
-      the hypothesis field that holds the flaw in "field" (statement, falsification_criteria,
-      method, conditions, evidence_refs, ...).
+      "already_established" (a card already reports the predicted result in the setting the
+      hypothesis would test; give that card's id in "card_id"). Name the hypothesis field that
+      holds the flaw in "field" (statement, falsification_criteria, method, conditions,
+      evidence_refs, ...).
+    CHECK AGAINST THE CARDS: the synthesis lists what every card reports under "cards". Read the
+    findings of the cards a hypothesis cites, and of the others, before you concede it: a card
+    that reports its predicted result makes it "already_established"; a card whose findings go
+    against its premise makes it "unsupported". A test in a setting, population, scale or
+    condition no card covers is not already established; that a card found something similar
+    elsewhere is at most a caveat.
     - "caveat": a limit or risk worth recording; the hypothesis can still be tested as written.
     Call an objection fatal only when it is one of the four flaws; everything else is a caveat.
     "concede" means you have no reservation at all. Any reservation, however small, is a
@@ -88,7 +95,11 @@ blocks:
        substance from the others. Do not reuse template sentences.
     5. TRACEABLE: each hypothesis must reference one gap id and evidence references that exist in
        the provided material (sub-question -> paper -> limitation -> gap -> hypothesis).
-    6. NOT TRIVIAL: do not restate well-known results or textbook facts.
+    6. NOT TRIVIAL: do not restate well-known results or textbook facts. The synthesis lists
+       what every card reports under "cards". Never predict a result a card already reports in
+       the setting you would test (a saving, a gain or a loss the card measured): that result
+       belongs in `rationale`. Predict what the cards leave open: a condition, population, scale
+       or mechanism no card has measured.
     7. SETTLE TENSIONS: where the synthesis lists tensions (cards that disagree), a hypothesis
        that settles one is the most informative kind: it predicts which side holds under which
        condition, so either result explains the disagreement. Put the condition in `conditions`
@@ -337,9 +348,10 @@ stages:
         abstract does not state; a limitation of earlier work is not a limitation of this paper.
       - Any field the abstract does not support MUST be null. Do not fill it with generic text.
 
-      QUOTES (strict): for every field you fill, "quotes" lists 1-3 passages copied character
+      QUOTES (strict): for every field you fill, "quotes" lists 1-6 passages copied character
       for character from the abstract that support it. Copy a contiguous run of words (at least
-      four words), do not paraphrase, shorten inside, translate or join passages. A field you
+      four words), do not paraphrase, shorten inside, translate or join passages; when the
+      abstract names several items in separate places, quote each place on its own. A field you
       cannot back with a quote must be null and has no quotes. The quotes are checked against the
       abstract; a quote that is not in it rejects the card.
 

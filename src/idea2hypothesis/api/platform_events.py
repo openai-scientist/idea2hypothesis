@@ -1294,6 +1294,8 @@ def _content_stage8(art: ArtifactStore, flags: Flags) -> StepEvents:
             if art.exists(4, "candidates.jsonl")
             else {}
         )
+        # False when the novelty search returned nothing: only the run's own papers were compared.
+        searched = report.get("search_coverage") not in ("run_corpus_only", "insufficient")
         checks = []
         for row in report.get("per_hypothesis", []):
             closest = row.get("closest_paper") or {}
@@ -1309,6 +1311,7 @@ def _content_stage8(art: ArtifactStore, flags: Flags) -> StepEvents:
                             "novel": similarity < threshold,
                             "closest": _citation(found) if found else closest.get("title", ""),
                             "similarity": similarity,
+                            "searched": searched,
                         },
                         "assessment": "heuristic, not proof of novelty",
                     },

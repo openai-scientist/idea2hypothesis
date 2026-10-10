@@ -37,6 +37,22 @@ async def test_debate_rounds_with_an_independent_reviewer(tmp_path: Path) -> Non
     assert art.read_json(8, "hypotheses.json")["debate_rounds"] == 1
 
 
+async def test_the_debate_sees_what_each_card_reports(tmp_path: Path) -> None:
+    # Without the cards' findings no critic could tell a claim a card already reports.
+    llm = FixtureLLM()
+    cfg = make_config(tmp_path, review={"mode": "auto"}, llm={"debate_rounds": 1})
+    services = make_services(tmp_path, llm=llm, config=cfg)
+    result = await run_pipeline(request(), services)
+    assert result.status is RunStatus.COMPLETED, result.error
+    art = services.store.artifacts(result.run_id)
+    card = next(iter(sorted((art.stage_dir(6) / "cards").glob("*.json"))))
+    findings = json.loads(card.read_text())["findings"][:60]
+    for key in ("perspective", "debate_critique", "debate_answer", "debate_review",
+                "hypothesis_gen"):  # fmt: skip
+        prompts = [c.user for c in llm.calls if c.key == key]
+        assert prompts and all(findings in p for p in prompts), key
+
+
 async def test_debate_without_a_reviewer_warns_that_the_judge_is_not_independent(
     tmp_path: Path,
 ) -> None:
@@ -214,6 +230,9 @@ async def test_source_errors_are_recorded_in_search_meta_and_warnings(tmp_path: 
         if e.stage == 4 and e.type == "stage.completed"
     ]
     assert any("429" in w for w in completed[0].data["warnings"])
+    # every query fails the same way: one line for the source, not one per query
+    assert len(meta["per_source"]["semantic_scholar"]["errors"]) > 1
+    assert sum("semantic_scholar:" in w for w in completed[0].data["warnings"]) == 1
 
 
 async def test_papers_without_abstracts_are_set_aside_before_screening(tmp_path: Path) -> None:

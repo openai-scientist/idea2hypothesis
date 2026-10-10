@@ -113,7 +113,7 @@ One card per shortlisted paper that has an abstract and whose card its abstract 
 also has a `.md` rendering. `knowledge_meta.json`: `shortlist_size`, `cards`, `evidence_scope`,
 `quoted`, `skipped`.
 
-Pass conditions for schema 2 cards: every filled field has 1 to 3 quotes, each at least four words
+Pass conditions for schema 2 cards: every filled field has 1 to 6 quotes, each at least four words
 long and found in the paper's abstract (from the shortlist) after normalisation: Unicode NFKC,
 curly quotes and dash variants folded, HTML tags removed, case folded, white space collapsed,
 surrounding quote marks and ellipses stripped. A `null` field has no quotes. Schema 1 cards,

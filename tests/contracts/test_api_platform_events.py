@@ -237,7 +237,9 @@ async def test_content_comes_from_the_real_artifacts(tmp_path: Path) -> None:
     assert selected == [h["id"] for h in hypotheses]
     checks = _of(events, "hypothesis.checked")
     assert checks and all("feasibility" not in c["payload"] for c in checks)  # never invented
-    assert all(set(c["payload"]["novelty"]) == {"novel", "closest", "similarity"} for c in checks)
+    novelty_keys = {"novel", "closest", "similarity", "searched"}
+    assert all(set(c["payload"]["novelty"]) == novelty_keys for c in checks)
+    assert all(c["payload"]["novelty"]["searched"] is True for c in checks)  # it found papers
     assert _of(events, "rule.checked")[0]["payload"]["rule"] == 5
     assert _of(events, "debate.turn")  # one turn per real perspective output
 

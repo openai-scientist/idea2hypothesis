@@ -666,3 +666,24 @@ def test_paraphrased_short_or_missing_quotes_reject_the_card() -> None:
     card = {**card, "problem": None, "data": None, "method": None}
     card["quotes"] = {"findings": ["lowers the expected calibration error by 3.1 points"]}
     assert not check_card_quotes(card, ABSTRACT).ok
+
+
+def test_a_field_naming_four_benchmarks_apart_quotes_each_place() -> None:
+    abstract = (
+        "We evaluate on RoleBench in terms of role-dependent responses. We also report "
+        "CharacterBench with regards to character customization performance. PersonaGym "
+        "regarding persona-agent behavior is used, and a customized MPI test for personality."
+    )
+    quotes = [
+        "RoleBench in terms of role-dependent responses",
+        "CharacterBench with regards to character customization performance",
+        "PersonaGym regarding persona-agent behavior",
+        "a customized MPI test for personality",
+    ]
+    card = {
+        "problem": None, "method": None, "data": "RoleBench, CharacterBench, PersonaGym, MPI",
+        "metrics": None, "findings": None, "limitations": None, "quotes": {"data": quotes},
+    }  # fmt: skip
+    assert check_card_quotes(card, abstract).ok
+    card["quotes"] = {"data": quotes * 2}
+    assert any("give at most 6" in e for e in check_card_quotes(card, abstract).errors)

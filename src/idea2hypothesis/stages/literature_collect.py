@@ -112,7 +112,15 @@ async def run(ctx: StageContext) -> list[str]:
     ctx.artifacts.write_text(STAGE, "references.bib", papers_to_bibtex(unique))
     ctx.artifacts.write_json(STAGE, "search_meta.json", meta)
 
-    warnings = [f"source error: {e}" for e in errors[:10]]
+    # One line per source: a rate limit fails every query the same way (all are in search_meta).
+    warnings = [
+        f"source error: {name}: {len(s.errors)} searches failed"
+        + (f", {s.served_from_cache} papers served from the cache instead" if s.served_from_cache
+           else "")
+        + f" (first: {s.errors[0]})"
+        for name, s in sorted(per_source.items())
+        if s.errors
+    ]  # fmt: skip
     failed_sources = [n for n, s in per_source.items() if s.requests and s.papers == 0 and s.errors]
     if failed_sources:
         warnings.append(f"no results from: {', '.join(sorted(failed_sources))}")
