@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from idea2hypothesis.literature.novelty import extract_keywords
+from idea2hypothesis.literature.search import NO_CITATION_COUNTS
 from idea2hypothesis.pipeline.contracts import Findings
 from idea2hypothesis.pipeline.models import StageContext
 from idea2hypothesis.stages.base import StageFailure, compact_json, gather_limited, request_json
@@ -86,6 +87,12 @@ def _abstract_cut(row: dict[str, Any]) -> bool:
     return len(str(row.get("abstract") or "")) > MAX_ABSTRACT_CHARS
 
 
+def citations_known(row: dict[str, Any]) -> bool:
+    """False when only sources without citation counts (arXiv) found the paper."""
+    records = row.get("source_records") or []
+    return not records or any(r.get("provider") not in NO_CITATION_COUNTS for r in records)
+
+
 def _prompt_view(row: dict[str, Any]) -> dict[str, Any]:
     abstract = str(row.get("abstract") or "")
     if _abstract_cut(row):
@@ -95,7 +102,8 @@ def _prompt_view(row: dict[str, Any]) -> dict[str, Any]:
         "title": row.get("title", ""),
         "year": row.get("year") or None,
         "venue": row.get("venue") or None,
-        "citation_count": row.get("citation_count", 0),
+        # null, not 0, when no source counts citations: a 0 reads as "nobody cites it".
+        "citation_count": row.get("citation_count", 0) if citations_known(row) else None,
         "abstract": abstract or None,
     }
 

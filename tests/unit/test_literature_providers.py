@@ -237,6 +237,35 @@ async def test_semantic_scholar_circuit_breaker_stops_requests() -> None:
     assert calls["n"] == first_calls  # no request while the breaker is open
 
 
+async def test_a_quota_that_resets_much_later_stops_further_requests() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, headers={"Retry-After": "62378"})
+
+    provider = OpenAlexProvider(client_for(handler), sleep=no_sleep, min_interval=0)
+    with pytest.raises(ProviderError, match="Retry-After 62378s too long"):
+        await provider.search("q", limit=5)
+    for _ in range(5):
+        with pytest.raises(ProviderError, match="circuit breaker open"):
+            await provider.search("another query", limit=5)
+    assert calls["n"] == 1  # asked once; the later queries never reach the server
+
+
+def test_a_breaker_opened_for_a_long_wait_stays_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = {"t": 1000.0}
+    monkeypatch.setattr(
+        "idea2hypothesis.literature.providers.http.time.monotonic", lambda: now["t"]
+    )
+    breaker = CircuitBreaker("x", cooldown_sec=120)
+    breaker.open_for(3600)
+    now["t"] += 600
+    assert not breaker.allow()
+    now["t"] += 3000
+    assert breaker.allow() and breaker.state == "half_open"
+
+
 def test_circuit_breaker_recovers_after_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
     now = {"t": 0.0}
     monkeypatch.setattr(

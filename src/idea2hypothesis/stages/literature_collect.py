@@ -13,6 +13,18 @@ from idea2hypothesis.stages.base import StageFailure
 from idea2hypothesis.storage.runs import utc_now
 
 STAGE = 4
+# Words that carry no subject. A topic written as a question ("Does X reduce Y, and when ...")
+# would otherwise give queries such as "Does X reduce survey".
+_FILLER = frozenset(
+    [
+        "a", "an", "the", "and", "or", "but", "nor", "of", "in", "on", "at", "to", "for",
+        "with", "by", "from", "as", "into", "onto", "about", "than", "that", "this", "these",
+        "those", "it", "its", "their", "there", "do", "does", "did", "is", "are", "was", "were",
+        "be", "been", "being", "can", "could", "will", "would", "should", "may", "might", "must",
+        "shall", "how", "what", "when", "where", "which", "who", "whom", "whose", "why",
+        "whether",
+    ]
+)  # fmt: skip
 
 
 def expand_queries(queries: list[str], topic: str) -> list[str]:
@@ -20,7 +32,13 @@ def expand_queries(queries: list[str], topic: str) -> list[str]:
     expanded: list[str] = []
     seen = {q.lower().strip() for q in queries}
     # Keep words only: punctuation such as "?" makes some sources reject the query.
-    words = [w for w in (re.sub(r"[^\w-]", "", word) for word in topic.split()) if w]
+    words = [
+        w
+        for w in (re.sub(r"[^\w-]", "", word) for word in topic.split())
+        if w and w.lower() not in _FILLER
+    ]
+    if not words:
+        return []
 
     def add(candidate: str) -> None:
         key = candidate.lower().strip()

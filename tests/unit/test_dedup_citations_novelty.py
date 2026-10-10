@@ -11,8 +11,16 @@ from idea2hypothesis.literature.models import (
     normalise_doi,
     normalise_title,
 )
-from idea2hypothesis.literature.novelty import DISCLAIMER, check_novelty, extract_keywords
-from tests.fixtures import FixtureLiterature
+from idea2hypothesis.literature.novelty import (
+    DISCLAIMER,
+    PAPERS_PER_HYPOTHESIS,
+    check_novelty,
+    extract_keywords,
+    overlap,
+)
+from tests.fixtures import FixtureLiterature, FixtureNoveltyJudge
+
+QUERIES = ["sleep duration exam performance", "quantum annealing protein folding"]
 
 
 def mk(title: str, provider: str, sid: str, **kw: object) -> Paper:
@@ -128,31 +136,51 @@ def test_paper_roundtrip_through_dict_keeps_provenance_and_key() -> None:
     assert restored == original and restored.cite_key == original.cite_key
 
 
-async def test_novelty_report_is_labelled_and_per_hypothesis() -> None:
+async def test_novelty_report_carries_the_judge_verdict_per_hypothesis() -> None:
     hypotheses = [
         {"id": "H1", "statement": "Sleep duration changes exam score in university students"},
         {"id": "H2", "statement": "Quantum annealing improves protein folding bandwidth"},
     ]
-    report = await check_novelty("sleep and exams", hypotheses, literature=FixtureLiterature())
+    judge = FixtureNoveltyJudge({"H1": "tested"})
+    report = await check_novelty(
+        "sleep and exams", hypotheses, queries=QUERIES, literature=FixtureLiterature(),
+        judge=judge,
+    )  # fmt: skip
     assert report["kind"] == "novelty_assessment" and report["disclaimer"] == DISCLAIMER
     assert report["total_papers_retrieved"] > 0 and report["search_coverage"] == "full"
-    closest = {r["hypothesis_id"]: r["closest_paper"] for r in report["per_hypothesis"]}
-    assert closest["H1"]["similarity"] > closest["H2"]["similarity"]
-    assert 0.0 <= report["novelty_score"] <= 1.0
+    rows = {r["hypothesis_id"]: r for r in report["per_hypothesis"]}
+    assert rows["H1"]["verdict"] == "tested" and rows["H2"]["verdict"] == "new"
+    assert rows["H1"]["reason"] == "tested by fixture"
+    # the judge reads at most five papers per hypothesis, the closest first
+    (items,) = judge.calls
+    assert all(len(i["papers"]) <= PAPERS_PER_HYPOTHESIS for i in items)
+    assert "sleep" in items[0]["papers"][0]["title"].lower()
+    assert rows["H1"]["closest_paper"]["paper_id"] == items[0]["papers"][0]["paper_id"]
+    assert report["similar_papers_found"] == 1
+    assert report["similar_papers"][0]["hypothesis_id"] == "H1"
+    assert report["novelty_score"] == 0.5 and report["assessment"] == "moderate"
+    assert report["recommendation"] == "differentiate_or_reconsider"
 
 
-async def test_the_overall_novelty_agrees_with_each_hypothesis() -> None:
+async def test_related_work_is_not_read_as_a_prior_test() -> None:
     hypotheses = [
-        {"id": "H1", "statement": "Quantum annealing improves protein folding bandwidth"},
-        {"id": "H2", "statement": "Sleep duration and academic performance in university students"},
-        {"id": "H3", "statement": "Glacier albedo shifts monsoon onset over coastal deltas"},
+        {"id": f"H{i}", "statement": "Sleep duration and exam scores of students"}
+        for i in range(1, 4)
     ]
-    report = await check_novelty("sleep and exams", hypotheses, literature=FixtureLiterature())
-    best = max(r["closest_paper"]["similarity"] for r in report["per_hypothesis"])
-    assert best >= report["similarity_threshold"]
-    # one close hypothesis is not diluted by the others
-    assert report["similar_papers_found"] >= 1
-    assert report["novelty_score"] <= round(1 - best, 3)
+    report = await check_novelty(
+        "sleep and exams", hypotheses, queries=QUERIES, literature=FixtureLiterature(),
+        judge=FixtureNoveltyJudge({"H1": "related", "H2": "related"}),
+    )  # fmt: skip
+    assert report["similar_papers_found"] == 0  # related papers are listed, not counted as tests
+    assert {p["verdict"] for p in report["similar_papers"]} == {"related"}
+    assert report["novelty_score"] == round(2 / 3, 3) and report["recommendation"] == "proceed"
+
+
+def test_overlap_is_the_share_of_the_hypothesis_words_a_paper_holds() -> None:
+    keywords = extract_keywords("Sleep duration and exam scores")
+    long_abstract = "We measured sleep duration and exam score. " + "Unrelated filler words. " * 80
+    assert overlap(keywords, "Sleep and exams", long_abstract) == 1.0  # length does not dilute it
+    assert overlap(keywords, "Glacier albedo", "monsoon onset over deltas") == 0.0
 
 
 async def test_novelty_without_any_coverage_is_flagged_not_perfect() -> None:
@@ -160,12 +188,29 @@ async def test_novelty_without_any_coverage_is_flagged_not_perfect() -> None:
         async def search(self, queries, *, limit, year_min=0):  # type: ignore[no-untyped-def]
             raise RuntimeError("network down")
 
+    judge = FixtureNoveltyJudge()
     report = await check_novelty(
-        "topic words", [{"id": "H1", "statement": "x y z claim"}], literature=Failing()
+        "topic words",
+        [{"id": "H1", "statement": "x y z claim"}],
+        queries=["x y z"],
+        literature=Failing(),
+        judge=judge,
     )
-    assert report["assessment"] == "insufficient_data"
+    assert report["assessment"] == "insufficient_data" and report["novelty_score"] is None
     assert report["recommendation"] == "proceed_with_caution"
-    assert report["search_errors"]
+    assert report["search_errors"] and judge.calls == []  # nothing to read, nothing judged
+
+
+async def test_a_failed_judgement_gives_no_verdict() -> None:
+    report = await check_novelty(
+        "sleep and exams",
+        [{"id": "H1", "statement": "Sleep duration changes exam score"}],
+        queries=QUERIES,
+        literature=FixtureLiterature(),
+        judge=FixtureNoveltyJudge(fail=True),
+    )
+    assert report["per_hypothesis"][0]["verdict"] is None
+    assert report["assessment"] == "insufficient_data" and report["novelty_score"] is None
 
 
 async def test_novelty_checked_only_against_the_run_papers_is_not_a_plain_proceed() -> None:
@@ -173,7 +218,9 @@ async def test_novelty_checked_only_against_the_run_papers_is_not_a_plain_procee
     report = await check_novelty(
         "sleep and exams",
         [{"id": "H1", "statement": "Quantum annealing improves protein folding bandwidth"}],
+        queries=["quantum annealing protein folding"],
         literature=FixtureLiterature([], source_errors={"openalex": "HTTP 429 (rate limited)"}),
+        judge=FixtureNoveltyJudge(),
         papers_already_seen=seen,
     )
     assert report["total_papers_retrieved"] == 0
@@ -181,6 +228,41 @@ async def test_novelty_checked_only_against_the_run_papers_is_not_a_plain_procee
     assert report["assessment"] == "high"
     assert report["recommendation"] == "proceed_with_caution"
     assert any("429" in e for e in report["search_errors"])
+
+
+async def test_novelty_searches_the_given_queries_and_reads_the_closest_paper() -> None:
+    papers = [
+        mk(f"Glacier albedo record {i}", "openalex", f"W{i}", citation_count=900 - i,
+           abstract="Glacier albedo and monsoon onset over coastal deltas.")
+        for i in range(40)
+    ]  # fmt: skip
+    papers.append(
+        mk(
+            "Quantum annealing improves protein folding bandwidth",
+            "arxiv",
+            "2401.1",
+            arxiv_id="2401.1",
+            citation_count=0,
+            abstract="We test whether quantum annealing improves protein folding bandwidth.",
+        )
+    )
+    literature = FixtureLiterature(papers)
+    judge = FixtureNoveltyJudge({"H1": "tested"})
+    report = await check_novelty(
+        "folding",
+        [{"id": "H1", "statement": "Quantum annealing improves protein folding bandwidth"}],
+        queries=["quantum annealing protein folding"],
+        literature=literature,
+        judge=judge,
+    )
+    assert literature.calls == [["quantum annealing protein folding"]]
+    assert report["search_queries"] == ["quantum annealing protein folding"]
+    assert report["papers_compared"] == 41
+    # the closest paper is the least cited of 41: it is still read, and read first
+    assert judge.calls[0][0]["papers"][0]["title"].startswith("Quantum annealing")
+    closest = report["per_hypothesis"][0]["closest_paper"]
+    assert closest["title"] == "Quantum annealing improves protein folding bandwidth"
+    assert report["similar_papers_found"] == 1
 
 
 def test_extract_keywords_drops_stop_words_and_short_tokens() -> None:

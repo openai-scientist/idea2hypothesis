@@ -1288,7 +1288,6 @@ def _content_stage8(art: ArtifactStore, flags: Flags) -> StepEvents:
     }
     if flags.novelty_check and art.exists(8, "novelty_report.json"):
         report = art.read_json(8, "novelty_report.json")
-        threshold = float(report.get("similarity_threshold", 0.25))
         known = (
             {str(r["paper_id"]): r for r in art.read_jsonl(4, "candidates.jsonl")}
             if art.exists(4, "candidates.jsonl")
@@ -1300,20 +1299,34 @@ def _content_stage8(art: ArtifactStore, flags: Flags) -> StepEvents:
         for row in report.get("per_hypothesis", []):
             closest = row.get("closest_paper") or {}
             similarity = float(closest.get("similarity", 0.0))
+            # Reports from before the judge decided by word overlap alone.
+            judged = "verdict" in row
+            if judged and row["verdict"] is None:
+                continue  # the papers could not be judged: there is no verdict to show
             # "Author et al., year" when the paper is one the run collected; its title otherwise.
             found = known.get(str(closest.get("paper_id")))
+            novelty: dict[str, Any] = {
+                "novel": (
+                    row["verdict"] != "tested"
+                    if judged
+                    else similarity < float(report.get("similarity_threshold", 0.25))
+                ),
+                "closest": _citation(found) if found else closest.get("title", ""),
+                "similarity": similarity,
+                "searched": searched,
+            }
+            if judged:
+                novelty["verdict"] = row["verdict"]
+                novelty["reason"] = row.get("reason") or ""
             checks.append(
                 (
                     "hypothesis.checked",
                     {
                         "hypothesis_id": row["hypothesis_id"],
-                        "novelty": {
-                            "novel": similarity < threshold,
-                            "closest": _citation(found) if found else closest.get("title", ""),
-                            "similarity": similarity,
-                            "searched": searched,
-                        },
-                        "assessment": "heuristic, not proof of novelty",
+                        "novelty": novelty,
+                        "assessment": "model judgement, not proof of novelty"
+                        if judged
+                        else "heuristic, not proof of novelty",
                     },
                 )
             )
@@ -1549,8 +1562,10 @@ def step_note(art: ArtifactStore, step_id: str) -> str | None:
         return _map_note(art, step_id)
     if step_id == "check" and art.exists(8, "novelty_report.json"):
         report = art.read_json(8, "novelty_report.json")
-        threshold = float(report.get("similarity_threshold", 0.25))
         rows = report.get("per_hypothesis", [])
+        if rows and "verdict" in rows[0]:
+            return _judged_note(report)
+        threshold = float(report.get("similarity_threshold", 0.25))
         similar = [float((r.get("closest_paper") or {}).get("similarity", 0)) for r in rows]
         novel = sum(1 for value in similar if value < threshold)
         if report.get("search_coverage") == "run_corpus_only":
@@ -1563,6 +1578,29 @@ def step_note(art: ArtifactStore, step_id: str) -> str | None:
             "(word overlap, a heuristic, not proof of novelty)."
         )
     return None
+
+
+def _judged_note(report: dict[str, Any]) -> str:
+    rows = report.get("per_hypothesis", [])
+    verdicts = [r.get("verdict") for r in rows]
+    if None in verdicts:
+        return "The papers found could not be judged, so there is no novelty verdict."
+    tested = [str(r["hypothesis_id"]) for r in rows if r["verdict"] == "tested"]
+    related = verdicts.count("related")
+    where = (
+        "the run's own papers (the search found no others)"
+        if report.get("search_coverage") == "run_corpus_only"
+        else "the papers found"
+    )
+    head = (
+        f"A paper among {where} may already test {', '.join(tested)}"
+        if tested
+        else f"No paper among {where} tests any of the {len(rows)}"
+    )
+    return (
+        f"{head}; {related} of {len(rows)} have related work. The model read the closest "
+        "papers to each; a judgement, not proof of novelty."
+    )
 
 
 def _map_note(art: ArtifactStore, step_id: str) -> str | None:

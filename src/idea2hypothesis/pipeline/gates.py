@@ -262,6 +262,13 @@ def quality_advisories(stage: Stage, artifacts: ArtifactStore) -> list[str]:
         report = artifacts.read_json(n, "novelty_report.json")
         if report.get("assessment") in ("low", "critical"):
             notes.append(f"novelty assessment is {report['assessment']} (heuristic)")
+        tested = [
+            str(r["hypothesis_id"])
+            for r in report.get("per_hypothesis", [])
+            if r.get("verdict") == "tested"
+        ]
+        if tested:
+            notes.append(f"a paper found may already test {', '.join(tested)}")
         if report.get("search_coverage") == "run_corpus_only":
             notes.append("novelty was compared only with the run's own papers (search found none)")
     return notes

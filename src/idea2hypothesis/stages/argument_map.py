@@ -507,8 +507,12 @@ async def run(ctx: StageContext) -> list[str]:
             "id": c["id"],
             "claim": c.get("claim") or c["title"],
             "cards": [
+                # What the paper studies and how, not only its findings: findings given as bare
+                # figures do not say which claim they bear on.
                 {
                     "card_id": cid,
+                    "title": _clip(cards[cid].get("title")),
+                    "method": _clip(cards[cid].get("method")),
                     "findings": _clip(cards[cid].get("findings")),
                     "data": _clip(cards[cid].get("data")),
                 }

@@ -8,6 +8,8 @@ from idea2hypothesis.api.platform_events import _hypothesis_payload, _set_aside_
 from idea2hypothesis.pipeline.contracts import (
     check_card_quotes,
     check_hypotheses,
+    check_novelty_judgements,
+    check_novelty_queries,
     check_synthesis,
     check_tensions,
     normalise_margin,
@@ -53,10 +55,61 @@ def test_sanitize_queries_dedups_and_shortens() -> None:
 def test_expand_queries_adds_broader_variants_without_repeating_planned_ones() -> None:
     topic = "effect of sleep duration on exam performance in university students"
     extra = expand_queries(["effect of sleep duration"], topic)
-    assert "effect of sleep duration survey" in extra
-    assert "exam performance in university students" in extra
+    assert "effect sleep duration exam survey" in extra
+    assert "duration exam performance university students" in extra
     assert len({q.lower() for q in extra}) == len(extra)
     assert expand_queries(["a"], "short topic")[0] == "short topic survey"
+
+
+def test_novelty_queries_are_a_few_plain_words_for_every_hypothesis() -> None:
+    ids = {"H1", "H2"}
+    good = {"queries": [
+        {"hypothesis_id": "H1", "query": "retrieval-augmented generation conflicting evidence"},
+        {"hypothesis_id": "H2", "query": "Alzheimer's disease RAG"},
+    ]}  # fmt: skip
+    assert check_novelty_queries(good, ids).ok
+    sentence = "On PubMedQA the retrieval effect will be greater for highly relevant passages"
+    bad = {"queries": [
+        {"hypothesis_id": "H1", "query": sentence},
+        {"hypothesis_id": "H1", "query": "ti:rag AND medical"},
+        {"hypothesis_id": "H9", "query": "sleep exams"},
+    ]}  # fmt: skip
+    errors = " ".join(check_novelty_queries(bad, ids).errors)
+    assert "write 2-7 keywords" in errors and "AND/OR/NOT" in errors
+    assert "H1 has more than one query" in errors and "unknown hypothesis H9" in errors
+    assert "hypotheses with no query: H2" in errors
+
+
+def test_novelty_judgements_name_only_the_papers_given() -> None:
+    papers = {"H1": {"p-1", "p-2"}, "H2": {"p-3"}}
+    good = {"judgements": [
+        {"hypothesis_id": "H1", "verdict": "tested", "paper_ids": ["p-2"], "reason": "r"},
+        {"hypothesis_id": "H2", "verdict": "new", "paper_ids": [], "reason": "r"},
+    ]}  # fmt: skip
+    assert check_novelty_judgements(good, papers).ok
+    bad = {"judgements": [
+        {"hypothesis_id": "H1", "verdict": "tested", "paper_ids": ["p-3"], "reason": "r"},
+        {"hypothesis_id": "H1", "verdict": "related", "paper_ids": [], "reason": ""},
+        {"hypothesis_id": "H9", "verdict": "new", "paper_ids": [], "reason": "r"},
+    ]}  # fmt: skip
+    errors = " ".join(check_novelty_judgements(bad, papers).errors)
+    assert "p-3 were not given for H1" in errors and "H1 is judged twice" in errors
+    assert "a 'related' verdict names the paper(s)" in errors and "reason is empty" in errors
+    assert "unknown hypothesis H9" in errors and "hypotheses not judged: H2" in errors
+    new_with_paper = {"judgements": [
+        {"hypothesis_id": "H2", "verdict": "new", "paper_ids": ["p-3"], "reason": "r"},
+    ]}  # fmt: skip
+    assert "a 'new' verdict names no paper" in " ".join(
+        check_novelty_judgements(new_with_paper, {"H2": {"p-3"}}).errors
+    )
+
+
+def test_expand_queries_leaves_out_the_words_of_a_question() -> None:
+    topic = "Does retrieval-augmented generation reduce hallucinations, and when does it fail?"
+    extra = expand_queries([], topic)
+    assert "retrieval-augmented generation reduce hallucinations survey" in extra
+    assert not any(w in q.lower().split() for q in extra for w in ("does", "and", "when", "it"))
+    assert expand_queries([], "What is it?") == []
 
 
 def rows(n: int, abstract: str = "sleep exam study") -> list[dict]:
@@ -75,6 +128,20 @@ def test_prefilter_splits_by_keyword_overlap_and_sorts_by_overlap() -> None:
     keep, dropped = screen.prefilter(candidates, ["sleep", "exam", "students"])
     assert [r["paper_id"] for r in keep] == ["c", "b"]
     assert [r["paper_id"] for r in dropped] == ["a"]
+
+
+def test_the_reviewer_sees_unknown_citations_as_null_not_zero() -> None:
+    def row(*providers: str) -> dict:
+        return {
+            "paper_id": "p-1", "title": "t", "abstract": "a", "citation_count": 0,
+            "source_records": [{"provider": p, "source_id": "x"} for p in providers],
+        }  # fmt: skip
+
+    assert screen._prompt_view(row("arxiv"))["citation_count"] is None
+    assert screen._prompt_view(row("arxiv", "openalex"))["citation_count"] == 0
+    assert screen._prompt_view(row("semantic_scholar"))["citation_count"] == 0
+    legacy = {"paper_id": "p-2", "title": "t", "abstract": "a", "citation_count": 7}
+    assert screen._prompt_view(legacy)["citation_count"] == 7
 
 
 def test_prefilter_sets_aside_papers_without_an_abstract() -> None:

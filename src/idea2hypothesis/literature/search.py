@@ -32,6 +32,8 @@ SOURCE_INFO: dict[str, tuple[str, str]] = {
     "semantic_scholar": ("Semantic Scholar", S2_URL),
     "arxiv": ("arXiv", ARXIV_URL),
 }
+#: Sources whose records carry no citation count: their 0 means unknown, not uncited.
+NO_CITATION_COUNTS = frozenset({"arxiv"})
 _MAX_STALE_SEC = 30 * 86400.0  # cached results are only a fallback when a provider fails
 
 

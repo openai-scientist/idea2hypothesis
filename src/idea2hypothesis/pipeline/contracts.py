@@ -41,6 +41,10 @@ MIN_SUB_QUESTIONS = 3
 MIN_STRATEGIES = 2
 MIN_GAPS = 2
 MIN_HYPOTHESES = 2
+#: Words in a novelty search query (fewest, most).
+NOVELTY_QUERY_WORDS = (2, 7)
+NOVELTY_VERDICTS = ("tested", "related", "new")
+_QUERY_SYNTAX = re.compile(r"\"|\b[a-z]{2,3}:|\b(?:AND|OR|NOT)\b")
 #: Syntheses from this schema on give each tension an id and the cards on each of its two sides.
 SIDED_TENSION_SCHEMA = 2
 TENSION_ID = re.compile(r"^X\d+$")
@@ -794,6 +798,96 @@ def check_argument_map(
             f.require(_text(r.get("rationale")), f"rationales[{i}].rationale is empty")
         ungrounded = sorted(hypothesis_ids - grounded)
         f.require(not ungrounded, f"hypotheses with no claim as rationale: {', '.join(ungrounded)}")
+    return f
+
+
+def check_novelty_queries(data: Any, hypothesis_ids: set[str]) -> Findings:
+    """One keyword query per hypothesis for the novelty search.
+
+    arXiv returns only papers holding every word of a query, so a query is a few plain words.
+    """
+    f = Findings()
+    if not f.require(isinstance(data, dict), "the novelty queries must be an object"):
+        return f
+    rows = data.get("queries")
+    if not f.require(isinstance(rows, list), "queries must be a list"):
+        return f
+    seen: set[str] = set()
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            f.error(f"queries[{i}] must be an object")
+            continue
+        hyp, query = str(row.get("hypothesis_id")), row.get("query")
+        if not f.require(hyp in hypothesis_ids, f"queries[{i}]: unknown hypothesis {hyp}"):
+            continue
+        if hyp in seen:
+            f.error(f"queries[{i}]: {hyp} has more than one query")
+        seen.add(hyp)
+        if not f.require(_text(query), f"queries[{i}].query is empty"):
+            continue
+        words = str(query).split()
+        f.require(
+            NOVELTY_QUERY_WORDS[0] <= len(words) <= NOVELTY_QUERY_WORDS[1],
+            f"queries[{i}]: '{query}' has {len(words)} words; write "
+            f"{NOVELTY_QUERY_WORDS[0]}-{NOVELTY_QUERY_WORDS[1]} keywords",
+        )
+        f.require(
+            not _QUERY_SYNTAX.search(str(query)),
+            f"queries[{i}]: '{query}' must be plain words, without double quotes, field "
+            "prefixes or AND/OR/NOT",
+        )
+    missing = sorted(hypothesis_ids - seen)
+    f.require(not missing, f"hypotheses with no query: {', '.join(missing)}")
+    return f
+
+
+def check_novelty_judgements(data: Any, papers: dict[str, set[str]]) -> Findings:
+    """The judge's verdict on each hypothesis against the papers it was given.
+
+    ``papers`` maps each hypothesis id to the ids of the papers given for it. "tested" and
+    "related" name at least one of those papers; "new" names none.
+    """
+    f = Findings()
+    if not f.require(isinstance(data, dict), "the novelty judgements must be an object"):
+        return f
+    rows = data.get("judgements")
+    if not f.require(isinstance(rows, list), "judgements must be a list"):
+        return f
+    seen: set[str] = set()
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            f.error(f"judgements[{i}] must be an object")
+            continue
+        hyp = str(row.get("hypothesis_id"))
+        if not f.require(hyp in papers, f"judgements[{i}]: unknown hypothesis {hyp}"):
+            continue
+        if hyp in seen:
+            f.error(f"judgements[{i}]: {hyp} is judged twice")
+        seen.add(hyp)
+        verdict = row.get("verdict")
+        f.require(
+            verdict in NOVELTY_VERDICTS,
+            f"judgements[{i}].verdict must be one of {', '.join(NOVELTY_VERDICTS)}",
+        )
+        ids = row.get("paper_ids")
+        if not f.require(
+            isinstance(ids, list) and all(isinstance(p, str) for p in ids),
+            f"judgements[{i}].paper_ids must be a list of paper ids",
+        ):
+            continue
+        unknown = sorted(set(ids) - papers[hyp])
+        f.require(
+            not unknown,
+            f"judgements[{i}]: {', '.join(unknown)} were not given for {hyp}; name only "
+            f"{', '.join(sorted(papers[hyp]))}",
+        )
+        if verdict == "new":
+            f.require(not ids, f"judgements[{i}]: a 'new' verdict names no paper")
+        elif verdict in NOVELTY_VERDICTS:
+            f.require(ids, f"judgements[{i}]: a '{verdict}' verdict names the paper(s)")
+        f.require(_text(row.get("reason")), f"judgements[{i}].reason is empty")
+    missing = sorted(set(papers) - seen)
+    f.require(not missing, f"hypotheses not judged: {', '.join(missing)}")
     return f
 
 

@@ -15,13 +15,15 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from idea2hypothesis.literature.novelty import check_novelty
+from idea2hypothesis.literature.novelty import Judge, check_novelty
 from idea2hypothesis.pipeline.contracts import (
     EQUIVALENCE,
     MIN_HYPOTHESES,
     PREDICTIONS,
     Findings,
     check_hypotheses,
+    check_novelty_judgements,
+    check_novelty_queries,
     hypothesis_reference_sets,
     normalise_margin,
     normalise_prediction,
@@ -377,6 +379,73 @@ def _not_used(data: dict[str, Any], candidates: dict[str, Candidate]) -> list[di
     return out
 
 
+async def _novelty_queries(
+    ctx: StageContext, hypotheses: list[dict[str, Any]]
+) -> tuple[list[str], list[str]]:
+    """One keyword query per hypothesis, in the set's order, and the problems met writing them.
+
+    The novelty check is advisory: when no valid queries come back the search is skipped and the
+    report says why, rather than the stage failing after the debate.
+    """
+    ids = {str(h["id"]) for h in hypotheses}
+    views = [
+        {k: h.get(k) for k in ("id", "statement", "exposure", "outcome", "conditions")}
+        for h in hypotheses
+    ]
+    prompt = ctx.prompts.render(
+        "novelty_queries", topic=ctx.topic, hypotheses_json=compact_json(views)
+    )
+    try:
+        data, _ = await request_json(
+            ctx, prompt, label="novelty_queries",
+            validate=lambda d: check_novelty_queries(d, ids),
+        )  # fmt: skip
+    except StageFailure as exc:
+        return [], [f"no search: the search queries could not be written ({exc.message})"]
+    by_id = {str(r["hypothesis_id"]): " ".join(str(r["query"]).split()) for r in data["queries"]}
+    return [by_id[str(h["id"])] for h in hypotheses], []
+
+
+#: Characters of each abstract the novelty judge reads.
+MAX_JUDGED_ABSTRACT_CHARS = 1500
+
+
+def _novelty_judge(ctx: StageContext, problems: list[str]) -> Judge:
+    """The model reads the papers closest to each hypothesis and says whether one tests it.
+
+    When no valid judgement comes back the report says so (``problems``) instead of the stage
+    failing after the debate: the novelty check is advisory.
+    """
+
+    async def judge(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]] | None:
+        papers = {str(i["hypothesis"]["id"]): {p["paper_id"] for p in i["papers"]} for i in items}
+        views = [
+            {
+                **{k: i["hypothesis"].get(k)
+                   for k in ("id", "statement", "exposure", "outcome", "conditions", "prediction")},
+                "papers": [
+                    {**p, "abstract": p["abstract"][:MAX_JUDGED_ABSTRACT_CHARS]}
+                    for p in i["papers"]
+                ],
+            }
+            for i in items
+        ]  # fmt: skip
+        prompt = ctx.prompts.render(
+            "novelty_judge", topic=ctx.topic, items_json=compact_json(views)
+        )
+        try:
+            data, _ = await request_json(
+                ctx, prompt, label="novelty_judge",
+                validate=lambda d: check_novelty_judgements(d, papers),
+            )  # fmt: skip
+        except StageFailure as exc:
+            problems.append(f"no judgement: the papers could not be judged ({exc.message})")
+            return None
+        return {str(r["hypothesis_id"]): r for r in data["judgements"]}
+
+    return judge
+
+
 async def run(ctx: StageContext) -> list[str]:
     synthesis = ctx.artifacts.read_json(7, "synthesis.json")
     cards = load_cards(ctx)
@@ -474,17 +543,31 @@ async def run(ctx: StageContext) -> list[str]:
         await ctx.progress("novelty", hypotheses=len(doc["hypotheses"]))
         queries_doc = ctx.artifacts.read_json(3, "queries.json")
         seen = ctx.artifacts.read_jsonl(4, "candidates.jsonl")
+        searches, query_problems = await _novelty_queries(ctx, doc["hypotheses"])
+        judge_problems: list[str] = []
         report = await check_novelty(
             ctx.topic,
             doc["hypotheses"],
+            queries=searches,
             literature=ctx.literature,
+            judge=_novelty_judge(ctx, judge_problems),
             papers_already_seen=seen,
             year_min=int(queries_doc.get("year_min") or 0),
         )
+        report["search_errors"] = [*query_problems, *report["search_errors"]]
+        report["judge_errors"] = judge_problems
         ctx.artifacts.write_json(STAGE, "novelty_report.json", report)
-        if report["assessment"] == "insufficient_data":
+        tested = [r["hypothesis_id"] for r in report["per_hypothesis"] if r["verdict"] == "tested"]
+        if tested:
+            warnings.append(
+                f"novelty: a paper found may already test {', '.join(tested)} "
+                "(see novelty_report.json)"
+            )
+        if judge_problems:
+            warnings.append(f"novelty was not judged: {judge_problems[0]}")
+        elif report["search_coverage"] == "insufficient":
             warnings.append("novelty assessment had insufficient search coverage")
-        elif report["search_coverage"] == "run_corpus_only":
+        if report["search_coverage"] == "run_corpus_only":
             errors = len(report["search_errors"])
             why = (
                 f"{errors} search errors, listed in novelty_report.json"

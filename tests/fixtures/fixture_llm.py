@@ -32,6 +32,8 @@ _MARKERS: list[tuple[str, str]] = [
     ("Score each perspective 1-10", "debate_judge"),
     ("Allowed evidence references", "perspective"),
     ("Judge how the evidence bears on each claim", "argument_map"),
+    ("Write one search query for each hypothesis", "novelty_queries"),
+    ("For each hypothesis below, read the papers listed with it", "novelty_judge"),
 ]
 
 
@@ -475,6 +477,31 @@ class FixtureLLM:
             for i, h in enumerate(hypotheses)
         ]
         return {"evidence_links": links, "rationales": rationales}
+
+    def _default_novelty_queries(self, info: PromptInfo) -> dict[str, Any]:
+        hypotheses = info.section_json("Hypotheses:\n")
+        return {
+            "queries": [
+                {"hypothesis_id": h["id"], "query": "sleep duration exam performance"}
+                for h in hypotheses
+            ]
+        }
+
+    def _default_novelty_judge(self, info: PromptInfo) -> dict[str, Any]:
+        """The first hypothesis has related work (its first paper); the others are new."""
+        items = info.section_json("Hypotheses and the papers to read:\n")
+        judgements = []
+        for i, item in enumerate(items):
+            related = i == 0 and bool(item["papers"])
+            judgements.append(
+                {
+                    "hypothesis_id": item["id"],
+                    "verdict": "related" if related else "new",
+                    "paper_ids": [item["papers"][0]["paper_id"]] if related else [],
+                    "reason": "The fixture reads no paper.",
+                }
+            )
+        return {"judgements": judgements}
 
     def _default_unknown(self, info: PromptInfo) -> Any:
         raise AssertionError(f"FixtureLLM got an unrecognised prompt: {info.user[:200]!r}")

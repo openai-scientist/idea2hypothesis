@@ -1,16 +1,16 @@
 """Heuristic novelty assessment of hypotheses against retrieved literature.
 
-The result is an *assessment*, not a proof of novelty: it measures keyword and title overlap
-between hypotheses and papers that were actually retrieved.
+The result is an *assessment*, not a proof of novelty: for each hypothesis a judge (the stage's
+model) reads the retrieved papers closest to it by keyword overlap and says whether one already
+tests its prediction. Papers that were not retrieved, or not among the closest, are not read.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from difflib import SequenceMatcher
 from typing import Any
 
 from idea2hypothesis.literature.models import LiteraturePort
@@ -123,45 +123,49 @@ def extract_keywords(text: str) -> list[str]:
     return out
 
 
-def _jaccard(a: Sequence[str], b: Sequence[str]) -> float:
-    sa, sb = set(a), set(b)
-    if not sa or not sb:
+def _stem(word: str) -> str:
+    return word[:-1] if len(word) > 4 and word.endswith("s") and not word.endswith("ss") else word
+
+
+def overlap(keywords: Sequence[str], title: str, abstract: str) -> float:
+    """Share of a hypothesis's keywords that a paper's title and abstract contain.
+
+    It only ranks papers for the judge to read: a paper can test the same prediction in other
+    words, and a high share does not mean it does.
+    """
+    wanted = {_stem(k) for k in keywords}
+    if not wanted:
         return 0.0
-    return len(sa & sb) / len(sa | sb)
+    found = {_stem(k) for k in extract_keywords(f"{title} {abstract}")}
+    return round(len(wanted & found) / len(wanted), 4)
 
 
-def similarity(
-    keywords: Sequence[str], title: str, abstract: str, reference_title: str = ""
-) -> float:
-    kw = _jaccard(keywords, extract_keywords(f"{title} {abstract}"))
-    if reference_title and title:
-        ratio = SequenceMatcher(None, reference_title.lower(), title.lower()).ratio()
-        return round(0.7 * kw + 0.3 * ratio, 4)
-    return round(kw, 4)
+#: Papers per hypothesis that the judge reads: the closest by keyword overlap.
+PAPERS_PER_HYPOTHESIS = 5
+#: Hypotheses to judge, each with the papers to read -> verdict per hypothesis id, each
+#: ``{"verdict", "paper_ids", "reason"}``; None when no judgement could be made. A verdict is
+#: "tested" (a paper already tests the prediction), "related" (one studies the same exposure or
+#: outcome without testing it) or "new" (none of the papers read does).
+Judge = Callable[[list[dict[str, Any]]], Awaitable[dict[str, dict[str, Any]] | None]]
 
 
-def build_queries(topic: str, statements: Sequence[str]) -> list[str]:
-    queries = [topic]
-    for statement in statements:
-        statement = statement.strip()
-        if len(statement) > 10:
-            queries.append(statement[:200])
-    keywords = extract_keywords(" ".join(statements))[:5]
-    if keywords:
-        joined = " ".join(keywords)
-        if joined not in queries:
-            queries.append(joined)
-    return queries[:5]
+def _paper_view(row: dict[str, Any], share: float) -> dict[str, Any]:
+    return {
+        "paper_id": str(row.get("paper_id", "")),
+        "title": str(row.get("title", "")),
+        "year": row.get("year", 0),
+        "venue": str(row.get("venue", "")),
+        "citation_count": row.get("citation_count", 0),
+        "url": str(row.get("url", "")),
+        "cite_key": str(row.get("cite_key", "")),
+        "similarity": share,
+    }
 
 
-def _assess(similar: list[dict[str, Any]]) -> tuple[float, str]:
-    if not similar:
-        return 1.0, "high"
-    top = similar[:5]
-    score = 1.0 - max(p["similarity"] for p in top)
-    if sum(1 for p in top if p["similarity"] >= 0.4 and p.get("citation_count", 0) >= 50) >= 2:
-        score *= 0.7
-    score = round(max(0.0, min(1.0, score)), 3)
+def _assess(verdicts: list[str]) -> tuple[float, str]:
+    """Share of hypotheses no paper tests (related work counts half)."""
+    score = sum(1.0 if v == "new" else 0.5 if v == "related" else 0.0 for v in verdicts)
+    score = round(score / len(verdicts), 3)
     if score >= 0.7:
         return score, "high"
     if score >= 0.45:
@@ -171,94 +175,75 @@ def _assess(similar: list[dict[str, Any]]) -> tuple[float, str]:
     return score, "critical"
 
 
-def _paper_view(
-    paper_id: str,
-    title: str,
-    year: Any,
-    venue: str,
-    citations: Any,
-    url: str,
-    cite_key: str,
-    sim: float,
-) -> dict[str, Any]:  # noqa: PLR0913
-    return {
-        "paper_id": paper_id,
-        "title": title,
-        "year": year,
-        "venue": venue,
-        "citation_count": citations,
-        "similarity": sim,
-        "url": url,
-        "cite_key": cite_key,
-    }
+def _recommendation(verdicts: list[str], coverage: str) -> str:
+    tested = verdicts.count("tested")
+    if tested and tested * 2 >= len(verdicts):
+        return "differentiate_or_reconsider"
+    if tested:
+        return "differentiate"
+    if coverage == "run_corpus_only":
+        return "proceed_with_caution"
+    return "proceed"
 
 
 async def check_novelty(
     topic: str,
     hypotheses: Sequence[dict[str, Any]],
     *,
+    queries: Sequence[str],
     literature: LiteraturePort | None,
+    judge: Judge,
     papers_already_seen: Sequence[dict[str, Any]] = (),
-    max_search_results: int = 30,
-    similarity_threshold: float = 0.25,
+    per_query: int = 15,
     year_min: int = 0,
 ) -> dict[str, Any]:
-    """Compare hypotheses with retrieved papers; searches the literature port when provided."""
-    statements = [str(h.get("statement", "")) for h in hypotheses]
-    queries = build_queries(topic, statements)
+    """Search for prior work on each hypothesis and have ``judge`` read the closest papers.
 
-    candidates: list[dict[str, Any]] = []
+    ``queries`` are short keyword queries, one per hypothesis, written by the stage: a whole
+    hypothesis sentence finds nothing on sources that match every word (arXiv). Keyword overlap
+    only picks which papers the judge reads; the verdicts decide what the report says.
+    """
+    queries = [q.strip() for q in queries if q.strip()]
+
+    rows: list[dict[str, Any]] = []
     search_errors: list[str] = []
     retrieved = 0
-    if literature is not None:
+    if literature is not None and queries:
         try:
-            report = await literature.search(
-                queries, limit=min(15, max_search_results), year_min=year_min
-            )
+            report = await literature.search(queries, limit=per_query, year_min=year_min)
         except Exception as exc:  # noqa: BLE001 - novelty is advisory and must not stop the run
             search_errors.append(f"{type(exc).__name__}: {exc}")
         else:
             retrieved = len(report.papers)
             search_errors.extend(report.errors)
-            for paper in report.papers[:max_search_results]:
-                candidates.append(
+            for paper in report.papers:
+                rows.append(
                     {
                         "paper_id": paper.paper_id, "title": paper.title, "year": paper.year,
                         "venue": paper.venue, "citation_count": paper.citation_count,
                         "url": paper.url, "cite_key": paper.cite_key, "abstract": paper.abstract,
                     }
                 )  # fmt: skip
-    for row in papers_already_seen:
-        if isinstance(row, dict):
-            candidates.append(row)
+    rows.extend(row for row in papers_already_seen if isinstance(row, dict))
+    # One row per paper: the search may return a paper the run already has.
+    papers: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = str(row.get("title", "")).strip().lower()
+        if key and str(row.get("abstract") or "").strip():
+            papers.setdefault(key, row)
 
-    # Each paper is compared with each hypothesis on its own (keywords pooled over the whole set
-    # dilute every overlap); the overall assessment rests on the same comparisons.
-    hyp_keywords = [extract_keywords(s) for s in statements]
-    closest: dict[int, dict[str, Any]] = {}
-    by_title: dict[str, dict[str, Any]] = {}
-    for row in candidates:
-        title = str(row.get("title", ""))
-        abstract = str(row.get("abstract", ""))
-        sims = [
-            similarity(kw, title, abstract, s)
-            for kw, s in zip(hyp_keywords, statements, strict=True)
-        ]
-        for i, sim in enumerate(sims):
-            if i not in closest or sim > closest[i]["similarity"]:
-                closest[i] = {"title": title, "paper_id": str(row.get("paper_id", "")),
-                              "similarity": sim}  # fmt: skip
-        top = max(sims, default=0.0)
-        key = title.lower()
-        if top >= similarity_threshold and top > by_title.get(key, {}).get("similarity", -1):
-            by_title[key] = _paper_view(
-                str(row.get("paper_id", "")), title, row.get("year", 0),
-                str(row.get("venue", "")), row.get("citation_count", 0),
-                str(row.get("url", "")), str(row.get("cite_key", "")), top,
-            )  # fmt: skip
-    similar = sorted(by_title.values(), key=lambda p: p["similarity"], reverse=True)
+    # Each hypothesis is ranked against every paper on its own; keywords pooled over the set
+    # would dilute every overlap.
+    shortlists: list[list[tuple[float, dict[str, Any]]]] = []
+    for hyp in hypotheses:
+        keywords = extract_keywords(str(hyp.get("statement", "")))
+        ranked = sorted(
+            ((overlap(keywords, str(r.get("title", "")), str(r.get("abstract", ""))), r)
+             for r in papers.values()),
+            key=lambda pair: pair[0], reverse=True,
+        )  # fmt: skip
+        shortlists.append(ranked[:PAPERS_PER_HYPOTHESIS])
 
-    score, assessment = _assess(similar)
     if retrieved == 0 and not papers_already_seen:
         coverage = "insufficient"
     elif retrieved == 0:
@@ -268,35 +253,71 @@ async def check_novelty(
         coverage = "partial"
     else:
         coverage = "full"
-    if coverage == "insufficient" and not similar:
-        assessment, recommendation = "insufficient_data", "proceed_with_caution"
-    elif assessment == "critical":
-        recommendation = "differentiate_or_reconsider"
-    elif assessment == "low":
-        recommendation = "differentiate"
-    elif coverage == "run_corpus_only":
-        recommendation = "proceed_with_caution"
-    else:
-        recommendation = "proceed"
 
-    per_hypothesis = [
-        {"hypothesis_id": hyp.get("id", ""), "closest_paper": closest.get(i)}
-        for i, hyp in enumerate(hypotheses)
-    ]
+    judged: dict[str, dict[str, Any]] | None = None
+    if papers:
+        judged = await judge(
+            [
+                {
+                    "hypothesis": hyp,
+                    "papers": [
+                        {"paper_id": str(r.get("paper_id", "")), "title": r.get("title", ""),
+                         "year": r.get("year") or None, "abstract": str(r.get("abstract", ""))}
+                        for _, r in shortlist
+                    ],
+                }
+                for hyp, shortlist in zip(hypotheses, shortlists, strict=True)
+            ]
+        )  # fmt: skip
+
+    per_hypothesis: list[dict[str, Any]] = []
+    similar: list[dict[str, Any]] = []
+    for hyp, shortlist in zip(hypotheses, shortlists, strict=True):
+        hid = str(hyp.get("id", ""))
+        by_id = {str(r.get("paper_id", "")): (share, r) for share, r in shortlist}
+        verdict = (judged or {}).get(hid) or {}
+        matches = [by_id[pid] for pid in verdict.get("paper_ids", []) if pid in by_id]
+        for share, r in matches:
+            similar.append({**_paper_view(r, share), "hypothesis_id": hid,
+                            "verdict": verdict["verdict"]})  # fmt: skip
+        first = matches[0] if matches else (shortlist[0] if shortlist else None)
+        per_hypothesis.append(
+            {
+                "hypothesis_id": hid,
+                "verdict": verdict.get("verdict"),
+                "reason": verdict.get("reason"),
+                # The paper the verdict names first; the closest by overlap when it names none.
+                "closest_paper": {"title": str(first[1].get("title", "")),
+                                  "paper_id": str(first[1].get("paper_id", "")),
+                                  "similarity": first[0]} if first else None,
+                "papers_read": list(by_id),
+            }
+        )  # fmt: skip
+
+    verdicts = [str(row["verdict"]) for row in per_hypothesis if row["verdict"]]
+    if judged is None or len(verdicts) < len(per_hypothesis) or not verdicts:
+        score, assessment, recommendation = None, "insufficient_data", "proceed_with_caution"
+    else:
+        score, assessment = _assess(verdicts)
+        recommendation = _recommendation(verdicts, coverage)
 
     return {
         "kind": "novelty_assessment",
         "disclaimer": DISCLAIMER,
+        "method": (
+            "a model read the papers closest to each hypothesis by keyword overlap and judged "
+            "whether one already tests its prediction"
+        ),
         "topic": topic,
         "hypotheses_checked": len(hypotheses),
         "search_queries": queries,
-        "similar_papers_found": len(similar),
+        "papers_compared": len(papers),
+        "similar_papers_found": len({p["paper_id"] for p in similar if p["verdict"] == "tested"}),
         "novelty_score": score,
         "assessment": assessment,
-        "similar_papers": similar[:20],
+        "similar_papers": similar,
         "per_hypothesis": per_hypothesis,
         "recommendation": recommendation,
-        "similarity_threshold": similarity_threshold,
         "search_coverage": coverage,
         "total_papers_retrieved": retrieved,
         "search_errors": search_errors,

@@ -295,8 +295,10 @@ stages:
          explain in "reason" which other field the paper belongs to.
       4. RECENCY: prefer recent work for methodology, but keep foundational older papers that
          introduced techniques still in use.
-      5. QUALITY FLOOR: lower quality_score for papers with no abstract, no venue or no citations
-         (they may not be real scholarly work).
+      5. QUALITY FLOOR: lower quality_score for papers with no abstract or no venue (they may not
+         be real scholarly work). citation_count null means the source does not count citations
+         (arXiv records): it says nothing about the paper. Few or no citations count against a
+         paper only when it is several years old; recent work has had no time to be cited.
 
       SCORES are separate from the decision. Score each paper on the anchors below first, then
       decide with the rules above. A paper that uses the topic's own terms for a problem in another
@@ -310,8 +312,9 @@ stages:
         0.00-0.29 unrelated.
       quality_score: how much the record lets a reader trust and use the work.
         0.85-1.00 peer-reviewed venue, abstract states method and results, cited by others.
-        0.65-0.84 venue or established preprint server; abstract states method and results.
-        0.45-0.64 workshop, thesis or preprint, or an abstract thin on method or results.
+        0.65-0.84 venue or an established preprint server (arXiv, bioRxiv, medRxiv, SSRN);
+                  abstract states method and results.
+        0.45-0.64 workshop paper, thesis or report, or an abstract thin on method or results.
         0.00-0.44 no abstract, no venue, or not clearly scholarly work.
       Write scores with two decimals (for example 0.83 or 0.71) and place each paper within its
       band; do not round to steps of 0.05 or 0.1. "decision" is "keep" or "reject". Give a
@@ -498,11 +501,14 @@ stages:
       Judge how the evidence bears on each claim, and which claims ground each hypothesis.
 
       1. Evidence links. Each claim below lists the cards grouped under it. Judge EVERY card
-         once, against that claim only:
+         once, against that claim only. Read the card whole: its title and method say what the
+         paper studies, its findings what it found.
          - "supports": the card's findings back the claim;
          - "contradicts": the findings go against the claim, or show it holds only in part;
-         - "unrelated": the findings do not bear on the claim after all.
-         The rationale says, in one sentence, what in the findings decides it.
+         - "unrelated": the paper does not bear on the claim after all, judged from what it
+           studies and what it found together; findings given only as figures are no reason to
+           call it unrelated.
+         The rationale says, in one sentence, what in the card decides it.
       2. Rationales. For each hypothesis, list the claims that give it a reason to expect its
          prediction ("supports") or a reason to doubt it ("challenges"). Every hypothesis needs
          at least one claim. Do not tie a claim that says nothing about the hypothesis.
@@ -524,6 +530,73 @@ stages:
         "evidence_links": [{"card_id": "card-p-...", "claim_id": "C1", "relation": "supports | contradicts | unrelated", "rationale": "..."}],
         "rationales": [{"claim_id": "C1", "hypothesis_id": "H1", "polarity": "supports | challenges", "rationale": "..."}]
       }
+
+  novelty_queries:
+    json_mode: true
+    max_tokens: 2048
+    temperature: 0
+    system: |
+      You write literature search queries. They are sent to OpenAlex, Semantic Scholar and
+      arXiv. arXiv returns only papers that contain every word of a query, so a query is a few
+      keywords, never a sentence.
+    user: |
+      Write one search query for each hypothesis below, to find published work that already
+      tests the same prediction.
+      - A plain string of 3-7 words naming what makes the hypothesis specific: its intervention
+        or method, its outcome, and the field or task it applies to.
+      - Name the field or task, not the particular dataset, benchmark or model the hypothesis
+        plans to use: work that already tested the prediction may have used another one.
+      - Use the terms papers in the field use, not the wording of the hypothesis: the name of a
+        method or measure rather than a description of the procedure.
+      - Leave out words that any paper could contain ("effect", "higher", "compared",
+        "approximately") and statistical vocabulary (estimand, interval, threshold).
+      - No double quotes, field prefixes (ti:, abs:) or AND/OR/NOT.
+      - Exactly one query for every hypothesis id below.
+      {{domain_guidance}}
+
+      Topic: {{topic}}
+
+      Hypotheses:
+      {{hypotheses_json}}
+
+      {{> json_rules}}
+      Schema:
+      {"queries": [{"hypothesis_id": "H1", "query": "three to seven keywords"}]}
+
+  novelty_judge:
+    json_mode: true
+    max_tokens: 4096
+    temperature: 0
+    system: |
+      You check research hypotheses against prior work. You read each paper's title and abstract
+      and decide whether it already tests what a hypothesis predicts. You judge only from the
+      text given to you and never assume what a paper did beyond it.
+    user: |
+      For each hypothesis below, read the papers listed with it and judge whether one already
+      tests its prediction.
+      - "tested": a paper reports a test of the same prediction: the same exposure or
+        intervention, the same outcome, and a result on the predicted effect, in the setting of
+        the hypothesis or one that contains it. List those papers in "paper_ids".
+      - "related": no paper tests the prediction, but a paper studies the same exposure or the
+        same outcome (another setting, another outcome, no result on the predicted effect). List
+        the closest such papers in "paper_ids".
+      - "new": no paper listed with the hypothesis studies its exposure or its outcome.
+        "paper_ids" is [].
+      A paper that tests the prediction in a narrower or different setting (another population,
+      task, scale or condition the hypothesis does not include) is "related", not "tested".
+      Name only papers listed with that hypothesis. "reason" says, in one sentence, what in the
+      paper decides the verdict (or, for "new", what the papers study instead).
+      Judge every hypothesis id below exactly once.
+      {{domain_guidance}}
+
+      Topic: {{topic}}
+
+      Hypotheses and the papers to read:
+      {{items_json}}
+
+      {{> json_rules}}
+      Schema:
+      {"judgements": [{"hypothesis_id": "H1", "verdict": "tested | related | new", "paper_ids": ["p-..."], "reason": "..."}]}
 
 sub_prompts:
   debate_critique:

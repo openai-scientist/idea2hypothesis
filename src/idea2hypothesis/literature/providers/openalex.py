@@ -16,6 +16,7 @@ from idea2hypothesis.literature.models import (
     normalise_doi,
 )
 from idea2hypothesis.literature.providers.http import (
+    CircuitBreaker,
     ProviderError,
     RateSpacer,
     Sleep,
@@ -45,6 +46,7 @@ class OpenAlexProvider:
         max_retries: int = 3,
         min_interval: float = 0.2,
         sleep: Sleep = asyncio.sleep,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         self._client = client
         self._email = email
@@ -53,6 +55,7 @@ class OpenAlexProvider:
         self._max_retries = max_retries
         self._sleep = sleep
         self._spacer = RateSpacer(min_interval, sleep)
+        self.breaker = breaker or CircuitBreaker("openalex")
 
     async def search(self, query: str, *, limit: int, year_min: int = 0) -> list[Paper]:
         params: dict[str, Any] = {
@@ -78,6 +81,7 @@ class OpenAlexProvider:
             headers={"Accept": "application/json", "User-Agent": agent},
             max_retries=self._max_retries,
             timeout=self._timeout,
+            breaker=self.breaker,
             spacer=self._spacer,
             sleep=self._sleep,
         )

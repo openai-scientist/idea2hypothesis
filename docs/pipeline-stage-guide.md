@@ -99,9 +99,12 @@ Output: `search_plan.yaml`, `queries.json`, `sources.json`.
 Module `stages/literature_collect.py`, package `literature/`. Input: `stage-03/queries.json`.
 
 * **Recall first.** The planned queries plus a few broader variants (shorter windows of the
-  topic, survey/benchmark/comparison forms) are sent to each configured provider, with
-  `literature.inter_query_delay_sec` between queries to respect rate limits. Providers retry on
-  429/5xx and transport errors; Semantic Scholar has a circuit breaker.
+  topic, survey/benchmark/comparison forms, built from the topic's content words so a topic
+  written as a question gives no "Does X reduce survey") are sent to each configured provider,
+  with `literature.inter_query_delay_sec` between queries to respect rate limits. Providers retry
+  on 429/5xx and transport errors and each has a circuit breaker. A 429 whose `Retry-After` is
+  longer than five minutes (a daily quota) opens the breaker for that long, so the provider is
+  asked once and the later queries fail at once instead of each waiting for the same answer.
 * **Provenance.** Each paper keeps `source_records` (provider, source id, URL, retrieval time).
 * **Deduplication.** Papers are merged by DOI, arXiv id or normalised title; the merged record keeps
   all source records, so the same paper found in two providers is one candidate with two records.
@@ -127,7 +130,9 @@ Module `stages/literature_screen.py`. Input: `stage-04/candidates.jsonl`, goal a
 * **Dual scoring.** The model, in batches, scores every remaining paper for relevance and
   quality (0 to 1) with a reason: domain match, method relevance, cross-domain rejection, recency
   preference, quality floor. Papers are kept at `research.min_relevance` and
-  `research.min_quality` (defaults 0.7 and 0.5).
+  `research.min_quality` (defaults 0.7 and 0.5). arXiv counts no citations, so a paper only arXiv
+  found is shown with `citation_count: null`, not 0, and the quality bands place arXiv and other
+  established preprint servers with venues: a missing count is never read as "nobody cites it".
 * **Anchored scores.** The prompt defines each score band (for relevance, 0.90 means the paper
   studies the question itself and 0.30 means it shares only a term) and asks for two decimals, so
   scores spread across a band instead of piling up on round values. Scores describe the paper and
@@ -239,10 +244,22 @@ constraints and, with memory enabled, past anti-patterns.
 * **Evidence-led direction.** The predicted sign of each hypothesis follows its evidence. Nothing
   asks the set to predict opposite directions or to include a counter-intuitive claim; a contrast
   is proposed only when the cited cards give a reason for it.
-* **Novelty assessment** (`research.novelty_check`, default true). Each hypothesis is compared
-  on its own with papers retrieved by new queries and the stage 4 pool, and the overall score
-  rests on the closest of those matches; the result is a heuristic score and
-  recommendation labelled as an assessment, not proof of novelty. When the search returns
+* **Novelty assessment** (`research.novelty_check`, default true). A model call
+  (`novelty_queries` prompt) writes one keyword query of 3-7 words per hypothesis, naming its
+  method, outcome and field rather than its planned dataset; arXiv returns only papers holding
+  every word, so whole hypothesis sentences would find nothing there. If no valid queries come
+  back after the repair rounds, the search is skipped and the report's `search_errors` says so;
+  the stage does not fail. For each hypothesis on its own, every paper with an abstract that the
+  queries retrieve or stage 4 collected is ranked by the share of the hypothesis's keywords it
+  holds, and a second model call (`novelty_judge` prompt) reads the five closest and gives a
+  verdict with a one-sentence reason: `tested` (a paper reports a test of the same prediction in
+  the hypothesis's setting or one containing it), `related` (a paper studies the same exposure or
+  outcome without testing it there) or `new`. Keyword overlap only chooses what the model reads;
+  the verdicts decide the score (the share of hypotheses no paper tests, related work counting
+  half), the assessment and the recommendation (`differentiate` when a paper tests one,
+  `differentiate_or_reconsider` when papers test half or more). A tested hypothesis is named in a
+  stage warning and a gate note. If no valid verdicts come back, the report gives none
+  (`insufficient_data`, `judge_errors`) and the stage warns rather than fails. When the search returns
   nothing (for example every provider is rate limited), only the stage 4 pool is compared: the
   report says `run_corpus_only`, the recommendation is at most `proceed_with_caution` and the
   stage warns.
@@ -257,7 +274,9 @@ Module `stages/argument_map.py`. Input: `goal.json`, `problem_tree.json`, cards,
 shortlist (for citations), `synthesis.json` and `hypotheses.json`.
 
 * **One model call** (`argument_map` prompt) judges what no earlier stage records: whether each
-  clustered card `supports`, `contradicts` or is `unrelated` to its own cluster's claim, and which
+  clustered card `supports`, `contradicts` or is `unrelated` to its own cluster's claim (it reads
+  each card's title, method, findings and data: findings given as bare figures do not say what
+  the paper studies), and which
   claims ground (`supports`) or `challenge` each hypothesis. Every clustered card is judged once and
   every hypothesis needs at least one claim, or the output is repaired and then rejected.
 * **Semantic graph** (Scientific Research Canvas v1.0): 7 entity types (question, evidence, claim,

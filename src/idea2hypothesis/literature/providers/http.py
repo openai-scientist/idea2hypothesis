@@ -76,6 +76,11 @@ class CircuitBreaker:
             return True
         return False
 
+    def open_for(self, seconds: float) -> None:
+        """Open at once for ``seconds``, as the server asked (a quota that resets much later)."""
+        self._cooldown = max(self._cooldown, seconds)
+        self._trip()
+
     def _trip(self) -> None:
         self._state = "open"
         self._opened_at = time.monotonic()
@@ -151,13 +156,16 @@ async def request_with_retry(
                 return response
             if status == 429:
                 last_error = "HTTP 429 (rate limited)"
-                if breaker is not None and breaker.on_failure():
-                    raise ProviderError(f"{provider}: {last_error}; circuit breaker opened")
                 wait = _retry_after(response, attempt)
                 if wait > LONG_RETRY_AFTER_SEC:
+                    # Every later request would get the same answer until then: stop asking.
+                    if breaker is not None:
+                        breaker.open_for(wait)
                     raise ProviderError(
                         f"{provider}: {last_error}; Retry-After {wait:.0f}s too long"
                     )
+                if breaker is not None and breaker.on_failure():
+                    raise ProviderError(f"{provider}: {last_error}; circuit breaker opened")
                 if attempt < max_retries - 1:
                     await sleep(min(wait, MAX_WAIT_SEC) + random.uniform(0, 0.2 * wait))
                 continue

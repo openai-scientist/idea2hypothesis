@@ -12,7 +12,7 @@ from idea2hypothesis.pipeline.models import RunStatus
 from idea2hypothesis.pipeline.runner import run_pipeline
 from idea2hypothesis.prompts.loader import PromptLoader
 from tests.conftest import make_config, make_services, request
-from tests.fixtures import FixtureLiterature, FixtureLLM, make_fixture_papers
+from tests.fixtures import FixtureLiterature, FixtureLLM, PromptInfo, make_fixture_papers
 
 
 async def test_debate_rounds_with_an_independent_reviewer(tmp_path: Path) -> None:
@@ -276,6 +276,109 @@ async def test_a_failed_novelty_search_is_reported_not_read_as_novel(tmp_path: P
         "compared only with the run's own papers" in w and "search errors" in w
         for w in completed[0].data["warnings"]
     )
+
+
+async def test_the_novelty_search_sends_one_short_query_per_hypothesis(tmp_path: Path) -> None:
+    literature = FixtureLiterature()
+    llm = FixtureLLM()
+    services = make_services(tmp_path, llm=llm, literature=literature, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+    assert result.status is RunStatus.COMPLETED
+    art = services.store.artifacts(result.run_id)
+    hypotheses = art.read_json(8, "hypotheses.json")["hypotheses"]
+    report = art.read_json(8, "novelty_report.json")
+    assert llm.count("novelty_queries") == 1
+    assert report["search_queries"] == ["sleep duration exam performance"] * len(hypotheses)
+    assert literature.calls[-1] == report["search_queries"]
+    assert report["search_coverage"] == "full"
+
+
+async def test_novelty_queries_that_never_come_back_valid_skip_the_search_only(
+    tmp_path: Path,
+) -> None:
+    sentence = {"queries": [{"hypothesis_id": "H1", "query": "a whole sentence " * 4}]}
+    llm = FixtureLLM(overrides={"novelty_queries": sentence})
+    literature = FixtureLiterature()
+    services = make_services(tmp_path, llm=llm, literature=literature, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+    assert result.status is RunStatus.COMPLETED
+    report = services.store.artifacts(result.run_id).read_json(8, "novelty_report.json")
+    assert report["search_queries"] == [] and report["total_papers_retrieved"] == 0
+    assert report["search_coverage"] == "run_corpus_only"
+    assert report["search_errors"][0].startswith("no search: the search queries could not")
+    completed = [
+        e
+        for e in services.store.read_events(result.run_id)
+        if e.stage == 8 and e.type == "stage.completed"
+    ]
+    warnings = completed[0].data["warnings"]
+    assert any("compared only with the run's own papers" in w for w in warnings)
+
+
+async def test_a_hypothesis_a_paper_already_tests_is_flagged(tmp_path: Path) -> None:
+    def tested_first(info: PromptInfo) -> dict:
+        items = info.section_json("Hypotheses and the papers to read:\n")
+        return {
+            "judgements": [
+                {
+                    "hypothesis_id": item["id"],
+                    "verdict": "tested" if i == 0 else "new",
+                    "paper_ids": [item["papers"][0]["paper_id"]] if i == 0 else [],
+                    "reason": "Its abstract reports the same test." if i == 0 else "Other topics.",
+                }
+                for i, item in enumerate(items)
+            ]
+        }
+
+    llm = FixtureLLM(overrides={"novelty_judge": tested_first})
+    services = make_services(tmp_path, llm=llm, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+    assert result.status is RunStatus.COMPLETED
+    art = services.store.artifacts(result.run_id)
+    report = art.read_json(8, "novelty_report.json")
+    first = report["per_hypothesis"][0]
+    assert first["verdict"] == "tested" and first["reason"] == "Its abstract reports the same test."
+    assert report["similar_papers_found"] == 1
+    assert report["recommendation"] in ("differentiate", "differentiate_or_reconsider")
+    completed = [
+        e
+        for e in services.store.read_events(result.run_id)
+        if e.stage == 8 and e.type == "stage.completed"
+    ]
+    assert any(
+        f"may already test {first['hypothesis_id']}" in w for w in completed[0].data["warnings"]
+    )
+
+
+async def test_papers_that_cannot_be_judged_give_no_verdict_and_the_run_goes_on(
+    tmp_path: Path,
+) -> None:
+    llm = FixtureLLM(overrides={"novelty_judge": {"judgements": []}})
+    services = make_services(tmp_path, llm=llm, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+    assert result.status is RunStatus.COMPLETED
+    report = services.store.artifacts(result.run_id).read_json(8, "novelty_report.json")
+    assert report["assessment"] == "insufficient_data" and report["novelty_score"] is None
+    assert report["judge_errors"][0].startswith("no judgement: the papers could not be judged")
+    assert all(r["verdict"] is None for r in report["per_hypothesis"])
+    completed = [
+        e
+        for e in services.store.read_events(result.run_id)
+        if e.stage == 8 and e.type == "stage.completed"
+    ]
+    assert any(w.startswith("novelty was not judged") for w in completed[0].data["warnings"])
+
+
+async def test_the_argument_map_sees_what_each_card_studies(tmp_path: Path) -> None:
+    llm = FixtureLLM()
+    services = make_services(tmp_path, llm=llm, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+    assert result.status is RunStatus.COMPLETED
+    prompt = next(c for c in llm.calls if c.key == "argument_map")
+    claims = prompt.section_json("Claims and their cards:\n", "Hypotheses:")
+    card = claims[0]["cards"][0]
+    assert {"title", "method", "findings", "data"} <= card.keys()
+    assert card["title"] and card["method"]
 
 
 async def test_when_no_paper_matches_the_topic_keywords_the_reviewer_judges_all(

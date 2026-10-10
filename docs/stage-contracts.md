@@ -210,8 +210,16 @@ written by earlier versions hold `responses` and the revised `hypotheses` in one
 `<role>.r<N>.json` and are read as before.
 
 `novelty_report.json` (when enabled): `kind: "novelty_assessment"`, a `disclaimer` stating it is a
-heuristic assessment and not proof of novelty, `novelty_score`, `assessment`, `recommendation`,
-`similar_papers`, `per_hypothesis[{hypothesis_id, closest_paper}]`, search coverage and errors.
+heuristic assessment and not proof of novelty, `method`, `novelty_score` (null when nothing was
+judged), `assessment`, `recommendation`, `papers_compared`, `similar_papers` (the papers a verdict
+names, each with `hypothesis_id` and `verdict`), `similar_papers_found` (papers judged to test a
+hypothesis), `per_hypothesis[{hypothesis_id, verdict, reason, closest_paper, papers_read}]`
+(`verdict` is `tested`, `related`, `new`, or null when the papers could not be judged;
+`closest_paper.similarity` is the share of the hypothesis's keywords that paper holds),
+`search_queries` (one keyword query per hypothesis, 2-7 plain words without quotes, field
+prefixes or AND/OR/NOT, checked by `check_novelty_queries`), search coverage, `search_errors`
+and `judge_errors`. `check_novelty_judgements` requires one verdict per hypothesis, naming only
+papers given for it: at least one for `tested` and `related`, none for `new`.
 `search_coverage` is `full`, `partial`, `run_corpus_only` (the search returned nothing, so only
 the stage 4 pool was compared; the recommendation is then at most `proceed_with_caution` and the
 stage warns) or `insufficient`.

@@ -360,8 +360,8 @@ async def test_cost_is_null_unless_priced(tmp_path: Path) -> None:
         run_id = (await h2.start("p-1", review_mode="auto")).json()["popper_run_id"]
         await h2.settle()
         state = await h2.state(run_id)
-        assert state["cost_usd"] == "0.2000"  # 20 priced calls
-        assert (await h2.events(run_id))[-1]["payload"]["cost_usd"] == "0.2000"
+        assert state["cost_usd"] == "0.2200"  # 22 priced calls
+        assert (await h2.events(run_id))[-1]["payload"]["cost_usd"] == "0.2200"
 
 
 async def test_budget_exceeded_pauses_a_priced_run(tmp_path: Path) -> None:
