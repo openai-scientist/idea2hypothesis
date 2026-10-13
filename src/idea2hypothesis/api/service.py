@@ -190,8 +190,8 @@ class RunService:
 
     async def wait_idle(self) -> None:
         """Wait for background run tasks and webhook deliveries (tests and shutdown)."""
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        while pending := [task for task in self._tasks if not task.done()]:
+            await asyncio.gather(*pending, return_exceptions=True)
         await self.deliveries.wait_idle()
 
     # ------------------------------------------------------------------

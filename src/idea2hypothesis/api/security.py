@@ -40,6 +40,24 @@ class ServiceKeyMiddleware:
             await self.app(scope, receive, send)
             return
         expected = os.environ.get(self.env_name, "")
+        path = scope["path"]
+        if (path == "/v1" or path.startswith("/v1/")) and path != "/v1/health":
+            if not expected:
+                response = JSONResponse(
+                    {"code": "SERVICE_KEY_NOT_CONFIGURED",
+                     "message": "Service key is not configured"},
+                    503,
+                )
+                await response(scope, receive, send)
+                return
+            supplied = _header(scope, HEADER)
+            if not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+                response = JSONResponse(
+                    {"code": "SERVICE_KEY_INVALID", "message": "Invalid or missing service key"},
+                    401,
+                )
+                await response(scope, receive, send)
+                return
         if expected and is_protected(scope["path"]):
             supplied = _header(scope, HEADER)
             if not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):

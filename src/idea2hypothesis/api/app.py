@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
 from idea2hypothesis import __version__
+from idea2hypothesis.api.contract import routes as contract_routes
 from idea2hypothesis.api.routes import bedrock, engine_runs, stages
 from idea2hypothesis.api.security import ServiceKeyMiddleware
 from idea2hypothesis.api.service import RunService, ServiceError
@@ -87,6 +88,7 @@ def create_app(
         return {"status": "ok", "version": __version__}
 
     app.include_router(engine_runs.router)
+    app.include_router(contract_routes.router, prefix="/v1")
     app.include_router(stages.router)
     app.include_router(bedrock.router)
     return app
