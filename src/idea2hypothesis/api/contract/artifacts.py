@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from idea2hypothesis.api.contract.models import ArtifactMeta
-from idea2hypothesis.api.contract.review import review_findings
+from idea2hypothesis.api.contract.review import review_findings, revision_response
 from idea2hypothesis.api.webhooks import DeliveryManager, callback_key
 from idea2hypothesis.pipeline import events as ev
 from idea2hypothesis.pipeline import gates
@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 I2H_HYPOTHESES = "i2h.hypotheses/v1"
 REVIEW_FINDINGS = "review.findings/v1"
 ARGUMENT_MAP = "i2h.argument_map/v1"
+REVISION_RESPONSE = "revision.response/v1"
 REGISTRY = "pushed_artifacts.json"
 CALLBACK_ARTIFACTS = "/artifacts"
 JSON_TYPE = "application/json"
@@ -161,9 +162,23 @@ class ArtifactPublisher:
         )  # fmt: skip
 
     async def push_review(self, run_id: str) -> dict[str, str]:
-        """Hypotheses first (the findings name them), then the findings of the review."""
+        """Hypotheses first (the findings name them), then the findings of the review.
+
+        After a revision round the generator's answer to the researcher's findings goes up too.
+        """
+        art = self.store.artifacts(run_id)
+        before = self.latest_id(run_id, I2H_HYPOTHESES)
         hypotheses_id = await self.push_hypotheses(run_id)
-        review = self.store.artifacts(run_id).read_json(8, "review.json")
+        review = art.read_json(8, "review.json")
+        if before and before != hypotheses_id and art.exists(8, "revision_responses.json"):
+            answer = revision_response(
+                art.read_json(8, "revision_responses.json"),
+                round_=int(review["round"]) - 1, before=before, after=hypotheses_id,
+            )  # fmt: skip
+            await self.ensure_pushed(
+                run_id, REVISION_RESPONSE, _json_bytes(answer.model_dump(mode="json")),
+                filename="revision_response.json", review_round=answer.round,
+            )  # fmt: skip
         findings = review_findings(review, artifact_id=hypotheses_id)
         findings_id = await self.ensure_pushed(
             run_id, REVIEW_FINDINGS, _json_bytes(findings.model_dump(mode="json")),
@@ -171,10 +186,24 @@ class ArtifactPublisher:
         )  # fmt: skip
         return {"hypotheses": hypotheses_id, "findings": findings_id}
 
+    async def push_final(self, run_id: str) -> dict[str, str]:
+        """The approved set (a new version when the researcher dropped or kept hypotheses) and
+        the argument map drawn from it."""
+        hypotheses_id = await self.push_hypotheses(run_id)
+        art = self.store.artifacts(run_id)
+        argument_map = art.read_json(9, "argument_map.json")
+        await self.ensure_pushed(
+            run_id, ARGUMENT_MAP, _json_bytes({"schema": ARGUMENT_MAP, **argument_map}),
+            filename="argument_map.json",
+        )  # fmt: skip
+        return {"hypotheses": hypotheses_id}
+
     async def before(self, run_id: str, event: Event) -> dict[str, str]:
         """Upload what ``event`` refers to; returns the ids the mapping puts on the wire."""
         if event.type == ev.REVIEW_COMPLETED:
             return await self.push_review(run_id)
+        if event.type == ev.RUN_COMPLETED:
+            return await self.push_final(run_id)
         if event.type == ev.GATE_OPENED and event.data.get("kind") == gates.HYPOTHESES:
             return {"hypotheses": await self.push_hypotheses(run_id)}
         return {}
