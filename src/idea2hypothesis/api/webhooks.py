@@ -81,9 +81,11 @@ class DeliveryManager:
         transport: httpx.AsyncBaseTransport | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         on_platform_closed: Callable[[str], Awaitable[None]] | None = None,
+        contract_log: PlatformEventLog | None = None,
     ) -> None:
         self.store = store
         self.log = log
+        self.contract_log = contract_log
         self.api = api
         self._transport = transport
         self._sleep = sleep
@@ -121,6 +123,23 @@ class DeliveryManager:
         state["updated_at"] = utc_now()
         write_json_atomic(self._delivery_path(run_id), state)
 
+    def log_for(self, run_id: str) -> PlatformEventLog:
+        """The event log a run delivers from: contract runs have their own."""
+        meta = self.read_meta(run_id)
+        if self.contract_log is not None and meta and meta.get("api") == "contract":
+            return self.contract_log
+        return self.log
+
+    def client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SEC, transport=self._transport)
+
+    async def platform_closed(self, run_id: str) -> None:
+        """The Platform no longer takes this run's callbacks: stop delivery, cancel the run."""
+        state = self.read_delivery(run_id)
+        state.update(status=STOPPED, last_error="platform closed the stage run")
+        self._write_delivery(run_id, state)
+        await self._platform_closed(run_id)
+
     # -- scheduling ---------------------------------------------------------
 
     def notify(self, run_id: str) -> None:
@@ -142,7 +161,7 @@ class DeliveryManager:
             state = self.read_delivery(run_id)
             if (
                 state["status"] != STOPPED
-                and self.log.last_seq(run_id) > state["delivered_source_seq"]
+                and self.log_for(run_id).last_seq(run_id) > state["delivered_source_seq"]
             ):
                 self.notify(run_id)
                 resumed.append(run_id)
@@ -170,6 +189,8 @@ class DeliveryManager:
         if meta is None:
             return
         url = meta["events_url"]
+        log = self.log_for(run_id)
+        contract = log is self.contract_log
         state = self.read_delivery(run_id)
         failures = 0
         try:
@@ -177,13 +198,20 @@ class DeliveryManager:
                 timeout=REQUEST_TIMEOUT_SEC, transport=self._transport
             ) as client:
                 while True:
-                    batch = self.log.read(run_id, state["delivered_source_seq"], BATCH_SIZE)
+                    batch = log.read(run_id, state["delivered_source_seq"], BATCH_SIZE)
                     if not batch:
                         state.update(status=IDLE, attempts=0)
                         self._write_delivery(run_id, state)
                         self._tasks.pop(run_id, None)
                         return
-                    outcome = await self._post(client, url, batch)
+                    outcome = await self._post(client, url, batch, contract=contract)
+                    if isinstance(outcome, int) and outcome != state["delivered_source_seq"]:
+                        # EVENT_GAP: the Platform holds events up to ``outcome``; resend after it.
+                        state.update(delivered_source_seq=outcome, status=ACTIVE, attempts=0)
+                        self._write_delivery(run_id, state)
+                        continue
+                    if isinstance(outcome, int):
+                        outcome = f"EVENT_GAP without progress at {outcome}"
                     if outcome == "ok":
                         failures = 0
                         state.update(
@@ -216,7 +244,10 @@ class DeliveryManager:
     def _backoff(self, failures: int) -> float:
         return float(min(2.0 ** (failures - 1), self.api.delivery_backoff_max_sec))
 
-    async def _post(self, client: httpx.AsyncClient, url: str, batch: list[dict[str, Any]]) -> str:
+    async def _post(
+        self, client: httpx.AsyncClient, url: str, batch: list[dict[str, Any]], *, contract: bool
+    ) -> str | int:
+        """``"ok"``, ``"closed"``, an error text, or (contract) the ``delivered_seq`` of a gap."""
         headers = {"Content-Type": "application/json"}
         key = callback_key(self.api)
         if key:
@@ -226,7 +257,14 @@ class DeliveryManager:
         except httpx.HTTPError as exc:
             return f"{type(exc).__name__}: {exc}"[:300]
         if response.status_code == 409:
-            return "closed"
+            if not contract:
+                return "closed"
+            body = _json_body(response)
+            if body.get("code") == "EVENT_GAP" and isinstance(body.get("delivered_seq"), int):
+                return int(body["delivered_seq"])
+            if body.get("code") == "STAGE_CLOSED":
+                return "closed"
+            return f"HTTP 409: {response.text[:200]}"
         if 200 <= response.status_code < 300:
             return "ok"
         return f"HTTP {response.status_code}: {response.text[:200]}"
@@ -239,3 +277,11 @@ class DeliveryManager:
                 await self._on_closed(run_id)
             except Exception:  # noqa: BLE001
                 logger.exception("could not cancel run %s after platform 409", run_id)
+
+
+def _json_body(response: httpx.Response) -> dict[str, Any]:
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}

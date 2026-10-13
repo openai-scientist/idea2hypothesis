@@ -133,8 +133,7 @@ async def test_reject_reruns_only_hypothesis_gen(tmp_path: Path) -> None:
     first = await run_pipeline(request(review_phase=True), services)
     before = _hashes(services, first.run_id)
     art = services.store.artifacts(first.run_id)
-    art.write_json(
-        8,
+    art.write_run_json(
         "researcher_findings.r1.json",
         [{
             "finding_id": "F1", "anchor": {"locator": "hypothesis:H1/prediction"},

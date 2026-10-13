@@ -20,6 +20,9 @@ from typing import Any
 
 import httpx
 
+from idea2hypothesis.api.contract.events import ContractEventLog
+from idea2hypothesis.api.contract.llm import LlmFactory
+from idea2hypothesis.api.contract.runs import ContractRuns
 from idea2hypothesis.api.platform_events import (
     PlatformEventLog,
     PlatformProjector,
@@ -100,14 +103,17 @@ class RunService:
         services: Services | None = None,
         callback_transport: httpx.AsyncBaseTransport | None = None,
         sleep: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
+        llm_factory: LlmFactory = build_llm,
     ) -> None:
         self.config = config
+        self.sleep = sleep
         self._injected = services
         self._services: Services | None = None
         self.store = services.store if services else RunStore(config.runs_root)
         self.control = services.control if services else RunControl()
         self.log = PlatformEventLog(self.store)
         self.projector = PlatformProjector(self.store, self.log)
+        contract_log = ContractEventLog(self.store)
         self.deliveries = DeliveryManager(
             self.store,
             self.log,
@@ -115,8 +121,10 @@ class RunService:
             transport=callback_transport,
             sleep=sleep,
             on_platform_closed=self._platform_closed,
+            contract_log=contract_log,
         )
         self.projector.listeners.append(self.deliveries.notify)
+        self.contract = ContractRuns(self, contract_log, llm_factory)
         self._tasks: set[asyncio.Task[Any]] = set()
         self._started: dict[str, asyncio.Event] = {}
         self._create_lock = asyncio.Lock()
@@ -132,7 +140,10 @@ class RunService:
 
     async def emit(self, event: Event) -> None:
         """Core event sink: project to Platform events, then signal run creation."""
-        await self.projector.emit(event)
+        if self.contract.is_contract(event.run_id):
+            await self.contract.projector.project(event.run_id)
+        else:
+            await self.projector.emit(event)
         if event.type == ev.RUN_STARTED and event.run_id in self._started:
             self._started[event.run_id].set()
 
@@ -202,7 +213,9 @@ class RunService:
         """Recover runs left ``running`` by a crash, finish projections, resume deliveries."""
         recovered = await self._recover_interrupted()
         for run_id in self.store.list_run_ids():
-            self.projector.project(run_id)
+            if not self.contract.is_contract(run_id):
+                self.projector.project(run_id)
+        await self.contract.project_all()
         resumed = self.deliveries.resume_all()
         return {"recovered": recovered, "delivery_resumed": resumed}
 
@@ -264,7 +277,7 @@ class RunService:
 
     def state(self, run_id: str) -> dict[str, Any]:
         """Wire state of a run for the Platform routes."""
-        self.projector.project(run_id)
+        self._project_legacy(run_id)
         record = self.record(run_id)
         status = RunStatus(record["status"])
         error = record.get("error")
@@ -285,8 +298,13 @@ class RunService:
             "last_source_seq": self.log.last_seq(run_id),
         }
 
+    def _project_legacy(self, run_id: str) -> None:
+        """Contract runs have their own projection; the legacy one leaves them alone."""
+        if not self.contract.is_contract(run_id):
+            self.projector.project(run_id)
+
     def events(self, run_id: str, after: int, limit: int) -> list[dict[str, Any]]:
-        self.projector.project(run_id)
+        self._project_legacy(run_id)
         return self.log.read(run_id, after, limit)
 
     # ------------------------------------------------------------------

@@ -148,6 +148,24 @@ class ArtifactStore:
                 return False
         return True
 
+    # -- run-level files ---------------------------------------------------
+    # Small documents that belong to the run, not to a stage, so no stage manifest covers them.
+
+    def _run_file(self, name: str) -> Path:
+        if Path(name).name != name:
+            raise ValueError(f"run file name must be a plain file name: {name!r}")
+        return self.run_dir / name
+
+    def write_run_json(self, name: str, obj: Any) -> None:
+        write_json_atomic(self._run_file(name), obj)
+
+    def read_run_json(self, name: str) -> Any | None:
+        """The stored document, or ``None`` when it is missing or unreadable."""
+        try:
+            return json.loads(self._run_file(name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
     # -- partial results --------------------------------------------------
     # Pieces of a stage's result kept while it runs (a scored batch, a card). They live outside
     # ``stage-NN`` so a paused or retried stage can reuse them, and are keyed by attempt so a new

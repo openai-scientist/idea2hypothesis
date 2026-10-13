@@ -680,8 +680,7 @@ def _rejection_feedback(
     if note.strip():
         lines.append(f"- {note.strip()}")
     if spec.kind == gates.HYPOTHESES and review_round is not None:
-        name = f"researcher_findings.r{review_round}.json"
-        findings = art.read_json(8, name) if art.exists(8, name) else []
+        findings = art.read_run_json(f"researcher_findings.r{review_round}.json") or []
         for f in findings:
             lines.append(
                 f"- finding {f['finding_id']} at {f['anchor']['locator']}: {f['issue']}"
