@@ -10,6 +10,7 @@ import pytest
 from tests.contract.fake_platform import validate
 from tests.fixtures.contract_harness import (
     INTEGRATION_MARKER,
+    OPENALEX_MARKER,
     SECRET_MARKER,
     contract_harness,
     run_body,
@@ -18,7 +19,7 @@ from tests.fixtures.contract_harness import (
 STAGE = "stage-run-1"
 
 
-async def test_create_contract_run_idempotent_by_stage_run_id(tmp_path):
+async def test_create_run_idempotent(tmp_path):
     async with contract_harness(tmp_path) as h:
         first = await h.create(STAGE)
         second = await h.create(STAGE)
@@ -121,37 +122,45 @@ async def test_review_model_must_differ_from_stage_model(tmp_path):
         assert response.status_code == 422
 
 
-async def test_no_secret_in_run_dir(tmp_path, caplog):
+async def test_no_secret_leak(tmp_path, caplog):
     caplog.set_level(logging.DEBUG)
+    markers = (SECRET_MARKER, INTEGRATION_MARKER, OPENALEX_MARKER)
+    integrations = {"semantic_scholar": INTEGRATION_MARKER, "openalex": OPENALEX_MARKER}
     async with contract_harness(tmp_path) as h:
-        state = await h.reach(STAGE)
+        state = await h.reach(STAGE, integrations=integrations)
         run_id = state["engine_run_id"]
+        gate_id = state["open_gate"]["gate_id"]
+        approved = await h.client.post(
+            f"/v1/runs/{run_id}/gates/{gate_id}", json={"action": "approve", "actor": "user"}
+        )
+        await h.settle()
+        final = await h.client.get(f"/v1/runs/{run_id}")
         events = await h.client.get(f"/v1/runs/{run_id}/events")
-        found = [
-            str(path)
-            for path in h.run_dir(run_id).rglob("*")
-            if path.is_file()
-            and any(m.encode() in path.read_bytes() for m in (SECRET_MARKER, INTEGRATION_MARKER))
-        ]
+        capabilities = await h.client.get("/v1/capabilities")
+        files = [p for p in h.run_dir(run_id).rglob("*") if p.is_file()]
+        assert any(p.name.endswith(".snapshot.json") for p in files) and files
 
-        assert found == []
-        for marker in (SECRET_MARKER, INTEGRATION_MARKER):
+        for marker in markers:
+            found = [str(p) for p in files if marker.encode() in p.read_bytes()]
+            assert found == [], f"{marker} was written to {found}"
             assert all(marker.encode() not in body for body in h.platform.bodies)
-            assert marker not in json.dumps(state) + events.text + caplog.text
+            responses = state, approved.text, final.text, events.text, capabilities.text
+            assert marker not in json.dumps(responses) and marker not in caplog.text
+        assert final.json()["phase"] == "published"
 
 
-async def test_model_calls_use_the_request_models(tmp_path):
+async def test_review_uses_review_model(tmp_path):
     async with contract_harness(tmp_path) as h:
         await h.reach(STAGE, stage_model="stage-x", review_model="review-x")
         calls = h.llm_calls()
 
-        reviewing = {model for phase, model in calls if phase == "reviewing"}
-        assert reviewing == {"review-x"}
+        reviewing = [model for phase, model in calls if phase == "reviewing"]
+        assert reviewing and set(reviewing) == {"review-x"}
         assert {model for phase, model in calls if phase == "drafting"} <= {"stage-x", "review-x"}
         assert "stage-x" in {model for _, model in calls}
 
 
-async def test_event_gap_resends(tmp_path):
+async def test_event_gap_triggers_resend_not_cancel(tmp_path):
     async with contract_harness(tmp_path) as h:
         h.platform.gaps[STAGE] = 0
         state = await h.reach(STAGE)
@@ -159,6 +168,7 @@ async def test_event_gap_resends(tmp_path):
         events = h.platform.events[STAGE]
         assert [e["source_seq"] for e in events] == list(range(1, len(events) + 1))
         assert state["phase"] == "awaiting_researcher"
+        assert "run.cancelled" not in h.platform.types(STAGE)
 
 
 async def test_stage_closed_cancels(tmp_path):

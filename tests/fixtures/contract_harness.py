@@ -6,7 +6,7 @@ phase and the model name of every call it answers.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,11 +20,12 @@ from idea2hypothesis.config import Config, LLMConfig
 from idea2hypothesis.llm.models import ChatMessage, LLMResponse
 from tests.conftest import TOPIC, make_services
 from tests.contract.fake_platform import FakePlatform
-from tests.fixtures import FixtureLiterature, FixtureLLM
+from tests.fixtures import FixtureLiterature, FixtureLLM, PromptInfo
 from tests.fixtures.api_helpers import SERVER_KEY, api_config, no_sleep
 
 SECRET_MARKER = "sk-contract-secret-9f3a1c"
 INTEGRATION_MARKER = "integration-secret-77d2"
+OPENALEX_MARKER = "openalex-secret-5b1e"
 PLATFORM = "http://platform.test/internal/engines/i2h/runs"
 
 
@@ -127,6 +128,7 @@ async def contract_harness(
     platform: FakePlatform | None = None,
     literature: FixtureLiterature | None = None,
     overrides: dict[str, Any] | None = None,
+    on_call: Callable[[PromptInfo], Awaitable[None] | None] | None = None,
     **sections: dict[str, Any],
 ) -> AsyncIterator[ContractHarness]:
     config = api_config(tmp_path, **sections)
@@ -139,7 +141,7 @@ async def contract_harness(
         assert api_key == SECRET_MARKER
         return FixtureModelLLM(
             cfg.model, calls, lambda: holder["h"].current_phase(),
-            FixtureLLM(overrides=dict(overrides or {})),
+            FixtureLLM(overrides=dict(overrides or {}), on_call=on_call),
         )  # fmt: skip
 
     app = create_app(

@@ -16,7 +16,7 @@ from idea2hypothesis.api.contract.models import (
 from idea2hypothesis.pipeline import events as ev
 from idea2hypothesis.pipeline import gates
 from idea2hypothesis.pipeline.events import Event
-from idea2hypothesis.pipeline.models import Stage
+from idea2hypothesis.pipeline.models import RunStatus, Stage
 
 Envelope = dict[str, Any]
 
@@ -181,9 +181,10 @@ def run_state(
     hypotheses_id: str | None,
 ) -> RunState:
     gate_state = record.get("gate")
+    finished = RunStatus(record["status"]).terminal  # a closed run waits for nobody
     open_gate = (
         gate_of(gate_state, [hypotheses_id] if hypotheses_id else [])
-        if gate_state and gate_state.get("status") == "open"
+        if gate_state and gate_state.get("status") == "open" and not finished
         else None
     )
     error = record.get("error")
