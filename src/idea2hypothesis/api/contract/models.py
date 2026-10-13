@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 CONTRACT_VERSION = "1.0.0"
 
@@ -75,3 +75,28 @@ class Health(ContractModel):
     active_runs: int = Field(ge=0)
     checks: dict[str, bool] | None = None
     last_error: str | None = None
+
+
+class ModelConfig(ContractModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    provider: Literal["openai_compatible", "bedrock"]
+    base_url: str | None = None
+    model: str = Field(min_length=1)
+    api_key: SecretStr | None = None
+    extra: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        return self.provider, self.model
+
+
+class Models(ContractModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    stage: ModelConfig
+    review: ModelConfig
+
+    @model_validator(mode="after")
+    def distinct_models(self) -> Models:
+        if self.stage.identity == self.review.identity:
+            raise ValueError("review model must differ from stage model")
+        return self

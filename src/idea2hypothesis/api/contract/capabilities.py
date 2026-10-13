@@ -34,7 +34,7 @@ def capabilities() -> Capabilities:
             "full": ["problem_decompose", "literature_screen"],
         },
         optional_integrations=["semantic_scholar", "openalex"],
-        providers=["openai_compatible", "bedrock"],
+        providers=["openai_compatible"],
         auto_revision=False,
         profiles=[ResearchProfile()],
     )
