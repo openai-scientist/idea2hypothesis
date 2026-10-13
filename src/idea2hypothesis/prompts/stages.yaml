@@ -487,6 +487,7 @@ stages:
 
       {{> json_rules}}
       Return {"hypotheses": [ {... every schema field ..., "from": ["innovator-1", "pragmatist-2"], "merge_note": "innovator-1 gives ...; pragmatist-2 gives ..."} ], "not_used": [{"candidate": "contrarian-3", "reason": "duplicate", "of": "H2", "text": "..."}], "disagreements": ["unresolved disagreement between perspectives", ...]}
+      Only when the feedback above lists reviewer findings (lines starting "- finding"), also return "revision_responses": [{"finding_id": "...", "outcome": "fixed|rebutted|not_fixed", "note": "..."}] with one entry for each finding.
 
   argument_map:
     json_mode: true
@@ -724,3 +725,54 @@ sub_prompts:
       {{> json_rules}}
       Schema:
       {"rankings": [{"role": "...", "score": 8, "reason": "..."}]}
+
+  hypothesis_review:
+    json_mode: true
+    max_tokens: 4096
+    temperature: 0
+    system: |
+      You are an independent reviewer of research hypotheses. You did not write them. Judge each
+      hypothesis on the evidence and on how it could be tested; do not rewrite them and do not
+      praise. Report only problems you can point at.
+    user: |
+      Review the final set of hypotheses below. Check every hypothesis against all of these
+      groups, and give each finding the group it belongs to in "category":
+      - leakage: the test could be contaminated by what was used to form or select the
+        hypothesis (the same data, benchmark or papers decide and then confirm it).
+      - baseline: the predicted effect has no fair comparison (no stated baseline or control
+        condition against which "greater" or "smaller" is judged).
+      - control: a confounder or alternative explanation the hypothesis does not rule out.
+      - statistics: the estimand, the equivalence margin or the falsification criterion cannot
+        be decided by a feasible sample or a defined test.
+      - reproducibility: the method, conditions or data are too vague for another group to
+        repeat the test.
+      - evidence: the cited cards do not support the claim, or contradict it, or a paper already
+        reports it. Use this group for every objection that still stands.
+      - other: any other problem.
+      For every objection listed as standing against a hypothesis ("contested", "held_back"),
+      confirm or reject it with the evidence, in a finding. Look for new problems as well.
+      Severity: "blocking" (the hypothesis should not go to experiment design as written),
+      "major" (should be fixed), "minor". Kind: "fix" (the text can be changed) or
+      "needs_evidence" (only new evidence settles it). "hypothesis_id" must be an id of the
+      set below; "field" names the field of the hypothesis the finding is about (for example
+      "statement", "prediction", "falsification_criteria"). Return no finding for a hypothesis
+      without a problem.
+
+      Topic: {{topic}}
+      Goal:
+      {{goal_json}}
+
+      Hypotheses under review (with the candidates held back or not used, the open tensions and
+      the disagreements of the debate):
+      {{hypotheses_json}}
+
+      Novelty report:
+      {{novelty_json}}
+
+      Evidence cards:
+      {{cards_json}}
+
+      Allowed categories: {{categories}}
+
+      {{> json_rules}}
+      Return {"findings": [{"hypothesis_id": "H1", "field": "prediction", "severity": "major", "category": "baseline", "kind": "fix", "issue": "...", "suggestion": "..."}]}

@@ -30,6 +30,13 @@ EVIDENCE_SCOPES = ("abstract", "full_text")
 DECISIONS = (
     "kept", "rejected", "below_cutoff", "unscored", "prefiltered", "dropped_by_reviewer"
 )  # fmt: skip
+#: Review finding groups (the five rubric groups of the platform contract, plus two).
+FINDING_CATEGORIES = (
+    "leakage", "baseline", "control", "statistics", "reproducibility", "evidence", "other"
+)  # fmt: skip
+FINDING_SEVERITIES = ("blocking", "major", "minor")
+FINDING_KINDS = ("fix", "needs_evidence")
+REVISION_OUTCOMES = ("fixed", "rebutted", "not_fixed")
 CARD_FIELDS = ("problem", "method", "data", "metrics", "findings", "limitations")
 CARD_CONTENT_FIELDS = ("problem", "method", "findings", "limitations")
 #: Cards from this schema on back every filled field with quotes from the abstract.

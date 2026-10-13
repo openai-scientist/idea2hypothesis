@@ -100,6 +100,8 @@ class RunRequest:
     run_id: str | None = None
     platform_run_id: str | None = None
     budget_usd: float | None = None
+    #: Contract runs: an independent review precedes the hypotheses gate, which opens in every mode.
+    review_phase: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,10 @@ class StageContext:
     report: Report | None = None
     #: Which execution of the stage this is (0 first; a transient LLM error starts another).
     try_index: int = 0
+    #: Contract run: the debate judge must be the independent reviewer model.
+    review_phase: bool = False
+    #: Announces a lifecycle phase (``reviewing``) to the run's observers.
+    on_phase: Callable[[str], Awaitable[None]] | None = None
 
     async def safe_point(self) -> None:
         """Raise :class:`RunInterrupted` if a pause or cancel was requested."""

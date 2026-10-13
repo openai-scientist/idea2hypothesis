@@ -25,6 +25,10 @@ RUN_RESUMED = "run.resumed"
 RUN_CANCELLED = "run.cancelled"
 RUN_FAILED = "run.failed"
 RUN_COMPLETED = "run.completed"
+#: A contract run entered a lifecycle phase; ``data = {"phase": str}``.
+PHASE_CHANGED = "phase.changed"
+#: The independent review of the final hypotheses finished; ``data = {"round", "passed"}``.
+REVIEW_COMPLETED = "review.completed"
 
 EVENT_TYPES = (
     RUN_STARTED,
@@ -39,6 +43,8 @@ EVENT_TYPES = (
     RUN_CANCELLED,
     RUN_FAILED,
     RUN_COMPLETED,
+    PHASE_CHANGED,
+    REVIEW_COMPLETED,
 )
 
 
