@@ -478,6 +478,9 @@ stages:
       cannot be tested under the stated constraints.
 
       {{> hypothesis_schema}}
+      In this final set every hypothesis object also has two more fields after "tension_ids":
+        "from": ["innovator-1", "pragmatist-2"]   (the candidate ids it is built from; never empty)
+        "merge_note": "innovator-1 gives ...; pragmatist-2 gives ..."
 
       Synthesis:
       {{synthesis_json}}

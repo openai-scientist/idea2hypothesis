@@ -118,6 +118,7 @@ def test_reliability_rules_are_in_the_prompts() -> None:
     for needle in ("FALSIFIABLE", "EVIDENCE-LED DIRECTION", "DISTINCT MECHANISMS", "TRACEABLE"):
         assert needle in hyp.user
     assert "falsification_criteria" in hyp.user and "estimand" in hyp.user
+    assert '"from": ["innovator-1"' in hyp.user and "never empty" in hyp.user
     # The set's direction and surprise follow the evidence; nothing forces either.
     assert "DIRECTIONALLY DIVERSE" not in hyp.user and "SURPRISING" not in hyp.system
     card = loader.render("knowledge_extract", **STAGE_VARIABLES["knowledge_extract"])

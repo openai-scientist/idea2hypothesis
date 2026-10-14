@@ -104,6 +104,25 @@ def test_novelty_judgements_name_only_the_papers_given() -> None:
     )
 
 
+def test_novelty_judgements_drop_ids_that_were_not_given_when_something_valid_remains() -> None:
+    papers = {"H1": {"p-1", "p-2"}, "H2": {"p-3"}}
+    data = {"judgements": [
+        {"hypothesis_id": "H1", "verdict": "tested", "paper_ids": ["p-1", "p-9"], "reason": "r"},
+        {"hypothesis_id": "H2", "verdict": "new", "paper_ids": ["p-9"], "reason": "r"},
+    ]}  # fmt: skip
+    result = check_novelty_judgements(data, papers)
+    assert result.ok and len(result.warnings) == 2
+    assert data["judgements"][0]["paper_ids"] == ["p-1"]
+    assert data["judgements"][1]["paper_ids"] == []
+    only_unknown = {"judgements": [
+        {"hypothesis_id": "H1", "verdict": "tested", "paper_ids": ["p-9"], "reason": "r"},
+        {"hypothesis_id": "H2", "verdict": "new", "paper_ids": [], "reason": "r"},
+    ]}  # fmt: skip
+    assert "p-9 were not given for H1" in " ".join(
+        check_novelty_judgements(only_unknown, papers).errors
+    )
+
+
 def test_expand_queries_leaves_out_the_words_of_a_question() -> None:
     topic = "Does retrieval-augmented generation reduce hallucinations, and when does it fail?"
     extra = expand_queries([], topic)
@@ -459,8 +478,6 @@ def test_every_challenge_gets_an_answer_that_does_what_it_says() -> None:
                                           "hypotheses": revised},
         "you revise hypothesis 1 but it is unchanged": {
             "answers": answers((1, "revise"), (2, "defend")), "hypotheses": before},
-        "list 2 in withdrawn": {"answers": answers((1, "defend"), (2, "withdraw")),
-                                "hypotheses": before},
         "answered more than once": {"answers": answers((1, "defend"), (1, "defend"), (2, "defend")),
                                     "hypotheses": before},
         "keep all 2 hypotheses": {"answers": answers((1, "defend"), (2, "defend")),
@@ -469,6 +486,18 @@ def test_every_challenge_gets_an_answer_that_does_what_it_says() -> None:
     }  # fmt: skip
     for needle, bad in cases.items():
         assert any(needle in e for e in check_answers(bad, before, challenges).errors), needle
+
+
+def test_a_withdrawal_missing_from_the_list_is_added_with_a_warning() -> None:
+    before = [{"statement": "a"}, {"statement": "b"}]
+    challenges = [{"from": "x", "response": 1, "hypothesis": 2, "text": "t"}]
+    data = {"answers": [{"challenge": 1, "action": "withdraw", "text": "because"}],
+            "hypotheses": before}  # fmt: skip
+    result = check_answers(data, before, challenges)
+    assert result.ok and data["withdrawn"] == [2]
+    assert len(result.warnings) == 1 and "withdrawn but not listed" in result.warnings[0]
+    kept = {**data, "answers": [{"challenge": 1, "action": "defend", "text": "because"}]}
+    assert check_answers(kept, before, challenges).warnings == []
 
 
 def test_a_fatal_challenge_names_its_flaw_and_where_it_is() -> None:
