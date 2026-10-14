@@ -229,7 +229,7 @@ async def get_checkpoint(run_id: str, service: RunService = Depends(get_service)
 
 
 @router.get(
-    "/api/phase1/runs/{run_id}/health-overview", tags=[PHASE1], summary="Health of stages 1-8"
+    "/api/phase1/runs/{run_id}/health-overview", tags=[PHASE1], summary="Health of stages 1-9"
 )
 async def get_health_overview(
     run_id: str, service: RunService = Depends(get_service)
