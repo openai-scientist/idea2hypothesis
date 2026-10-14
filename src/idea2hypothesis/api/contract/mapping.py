@@ -164,6 +164,10 @@ def _activity(
 ) -> Envelope:
     refs = _refs(payload)
     detail = payload.get("text") if kind == "agent.message" else None
+    if kind == "review.finding":
+        # Readable on its own; the artifact id stays in refs.
+        severity = str(payload.get("severity", "")).capitalize()
+        detail = f"{severity} · {payload.get('category', '')}: {payload.get('issue', '')}"
     summary = " ".join(str(detail or _ACTIVITY_LABELS[kind]).split()).rstrip(".!?")
     if not detail and refs:
         summary += f" ({', '.join(refs[:3])})"
