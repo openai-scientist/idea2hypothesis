@@ -189,5 +189,7 @@ async def test_the_screen_reviewer_reads_whole_abstracts(tmp_path: Path) -> None
     review = art.read_json(5, "review.json")
     assert review["reviewer_view"]["abstract_max_chars"] >= 4000
     prompts = " ".join(c.user for c in llm.calls if c.key == "literature_screen")
+    prefiltered = {d["paper_id"] for d in review["decisions"] if d["decision"] == "prefiltered"}
     for row in art.read_jsonl(4, "candidates.jsonl"):
-        assert row["abstract"] in prompts
+        if row["paper_id"] not in prefiltered:
+            assert row["abstract"] in prompts

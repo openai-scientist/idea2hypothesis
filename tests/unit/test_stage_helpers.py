@@ -126,7 +126,10 @@ def test_prefilter_splits_by_keyword_overlap_and_sorts_by_overlap() -> None:
         {"paper_id": "c", "title": "Sleep and exam", "abstract": "exam sleep students"},
     ]
     keep, dropped = screen.prefilter(candidates, ["sleep", "exam", "students"])
-    assert [r["paper_id"] for r in keep] == ["c", "b"]
+    assert [r["paper_id"] for r in keep] == ["c"]  # 3 keywords: one match is not enough
+    assert [r["paper_id"] for r in dropped] == ["a", "b"]
+    keep, dropped = screen.prefilter(candidates, ["sleep", "exam"])
+    assert [r["paper_id"] for r in keep] == ["c", "b"]  # fewer than 3 keywords: one is enough
     assert [r["paper_id"] for r in dropped] == ["a"]
 
 
@@ -142,6 +145,40 @@ def test_the_reviewer_sees_unknown_citations_as_null_not_zero() -> None:
     assert screen._prompt_view(row("semantic_scholar"))["citation_count"] == 0
     legacy = {"paper_id": "p-2", "title": "t", "abstract": "a", "citation_count": 7}
     assert screen._prompt_view(legacy)["citation_count"] == 7
+
+
+def test_prefilter_matches_whole_words_only() -> None:
+    candidates = [
+        {"paper_id": "a", "title": "HTML pages", "abstract": "markup"},
+        {"paper_id": "b", "title": "Deep-learning for ML", "abstract": "x"},
+    ]
+    keep, dropped = screen.prefilter(candidates, ["ml", "deep-learning"])
+    assert [r["paper_id"] for r in keep] == ["b"]
+    assert [r["paper_id"] for r in dropped] == ["a"]
+
+
+def test_prefilter_needs_two_matches_from_three_keywords_and_can_be_relaxed() -> None:
+    candidates = [
+        {"paper_id": "a", "title": "Sleep", "abstract": "only one"},
+        {"paper_id": "b", "title": "Sleep exam", "abstract": "two"},
+    ]
+    keywords = ["sleep", "exam", "students"]
+    assert [r["paper_id"] for r in screen.prefilter(candidates, keywords)[0]] == ["b"]
+    relaxed = screen.prefilter(candidates, keywords, min_overlap=1)[0]
+    assert [r["paper_id"] for r in relaxed] == ["b", "a"]
+
+
+def test_the_strict_prefilter_is_relaxed_when_too_few_papers_remain() -> None:
+    keywords = ["sleep", "exam", "students"]
+    strong = [
+        {"paper_id": f"s{i}", "title": "Sleep exam", "abstract": "x"} for i in range(6)
+    ]
+    weak = [{"paper_id": "w", "title": "Sleep", "abstract": "x"}]
+    to_screen, dropped, warns = screen.select_for_screening(strong + weak, keywords, 2)
+    assert len(to_screen) == 6 and [r["paper_id"] for r in dropped] == ["w"] and not warns
+    to_screen, dropped, warns = screen.select_for_screening(strong + weak, keywords, 3)
+    assert len(to_screen) == 7 and not dropped
+    assert len(warns) == 1 and "relaxed" in warns[0]
 
 
 def test_prefilter_sets_aside_papers_without_an_abstract() -> None:
