@@ -52,7 +52,7 @@ prompts:
 runtime:
   max_retries: 2                 # stage-level retries after the LLM retries are exhausted
   retry_delay_sec: 30.0
-  concurrency: 2                 # parallel LLM calls in stage 8; keep low under Bedrock quotas
+  concurrency: 4                 # parallel LLM calls in stage 8; the router honours Retry-After on 429
   ideation_memory: false
 
 review:
