@@ -16,6 +16,7 @@ from idea2hypothesis.pipeline.contracts import (
     Findings,
     card_id_for,
     check_card_quotes,
+    quote_problems,
 )
 from idea2hypothesis.pipeline.models import StageContext
 from idea2hypothesis.stages.base import StageFailure, compact_json, gather_limited, request_json
@@ -23,6 +24,8 @@ from idea2hypothesis.storage.runs import utc_now
 
 STAGE = 6
 EVIDENCE_SCOPE = "abstract"
+#: Salvage never nulls these; a card that would lose one goes back to the model.
+CORE_FIELDS = ("problem", "method", "findings")
 
 
 def check_card_fields(data: Any, abstract: str | None = None) -> Findings:
@@ -38,6 +41,52 @@ def check_card_fields(data: Any, abstract: str | None = None) -> Findings:
         )
     if abstract is not None and f.ok:
         f.extend(check_card_quotes(data, abstract))
+    return f
+
+
+def salvage_card(data: dict[str, Any], abstract: str) -> list[str]:
+    """Repair a card in place without asking the model again; returns one warning per repair.
+
+    A quote that is too short or not word for word in the abstract is removed. A field left
+    without a verified quote is set to null and its quotes are dropped. Quote text is never
+    written or edited, and a filled field never keeps unverified support. A core field
+    (problem, method, findings) is never nulled here: that card goes back to the model.
+    """
+    quotes = data.get("quotes")
+    if not isinstance(quotes, dict):
+        return []
+    warnings: list[str] = []
+    for key in CARD_FIELDS:
+        raw = quotes.get(key)
+        if not isinstance(raw, list):
+            continue
+        if not (isinstance(data.get(key), str) and data[key].strip()):
+            if raw:
+                del quotes[key]
+                warnings.append(f"{key} is null; its {len(raw)} quote(s) were dropped")
+            continue
+        kept = [q for q in raw if isinstance(q, str) and not quote_problems(key, [q], abstract)]
+        if len(kept) == len(raw):
+            continue
+        if kept:
+            quotes[key] = kept
+            warnings.append(f"{key}: {len(raw) - len(kept)} unverified quote(s) removed")
+        elif key not in CORE_FIELDS:
+            data[key] = None
+            del quotes[key]
+            warnings.append(f"{key} set to null: no quote of it was verified in the abstract")
+    return warnings
+
+
+def _validate_card(data: Any, abstract: str) -> Findings:
+    """Field types, then salvage, then the full quote check; salvage is reported as warnings."""
+    f = check_card_fields(data)
+    if not f.ok:
+        return f
+    salvaged = salvage_card(data, abstract)
+    f = check_card_fields(data, abstract)
+    if f.ok:
+        f.warnings.extend(salvaged)
     return f
 
 
@@ -84,13 +133,13 @@ async def _extract(ctx: StageContext, paper: dict[str, Any]) -> dict[str, Any]:
     }
     prompt = ctx.prompts.render("knowledge_extract", topic=ctx.topic, paper_json=compact_json(view))
     abstract = str(paper.get("abstract") or "")
-    data, _ = await request_json(
+    data, warnings = await request_json(
         ctx,
         prompt,
         label=f"knowledge_extract {paper['paper_id']}",
-        validate=lambda d: check_card_fields(d, abstract),
+        validate=lambda d: _validate_card(d, abstract),
     )
-    return {
+    card = {
         "schema_version": QUOTED_CARD_SCHEMA,
         "card_id": card_id_for(str(paper["paper_id"])),
         "paper_id": paper["paper_id"],
@@ -106,6 +155,9 @@ async def _extract(ctx: StageContext, paper: dict[str, Any]) -> dict[str, Any]:
         "quotes": _quotes(data),
         "generated_at": utc_now(),
     }
+    if warnings:
+        card["warnings"] = list(warnings)
+    return card
 
 
 def _partial_name(paper: dict[str, Any]) -> str:
@@ -180,4 +232,8 @@ async def run(ctx: StageContext) -> list[str]:
             "generated_at": utc_now(),
         },
     )
-    return [f"{s['paper_id']}: {s['reason']}" for s in skipped]
+    return [f"{s['paper_id']}: {s['reason']}" for s in skipped] + [
+        f"{card['paper_id']}: card repaired in code, {w}"
+        for card in cards
+        for w in card.get("warnings") or []
+    ]
