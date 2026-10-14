@@ -96,7 +96,7 @@ async def test_question_gate_answer_mapping(tmp_path):
 
         assert state["phase"] == "drafting" and state["waiting_input"] is True
         assert gate["kind"] == "question" and gate["step_key"] == "literature_screen"
-        assert [o["option_id"] for o in gate["options"]] == ["approve", "reject"]
+        assert [o["option_id"] for o in gate["options"]] == ["approve", "drop", "reject"]
         assert gate["default_option_id"] == "approve"
 
         reject = {"action": "answer", "actor": "user", "option_id": "reject"}

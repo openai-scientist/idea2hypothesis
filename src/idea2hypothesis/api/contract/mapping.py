@@ -63,6 +63,7 @@ class MapContext:
     actors: dict[str, str] = field(default_factory=dict)
     ids: dict[str, str] = field(default_factory=dict)
     review: dict[str, Any] = field(default_factory=dict)
+    question_payload: dict[str, Any] = field(default_factory=dict)
 
 
 def _envelope(
@@ -88,18 +89,31 @@ def step_of(stage: int | None) -> str | None:
     return STEP_KEYS[stage - 1] if stage and 1 <= stage <= len(STEP_KEYS) else None
 
 
-def gate_of(state: dict[str, Any], artifact_ids: list[str]) -> Gate:
+def gate_of(
+    state: dict[str, Any], artifact_ids: list[str], question_payload: dict[str, Any] | None = None
+) -> Gate:
     """The wire gate of a core gate state (``gate_id``, ``kind``, ``stage``, ``opened_at``)."""
     if state["kind"] == gates.HYPOTHESES:
         return Gate(
             gate_id=state["gate_id"], kind="artifact_review", step_key=step_of(state["stage"]),
             prompt=HYPOTHESES_PROMPT, opened_at=state["opened_at"], artifact_ids=artifact_ids,
         )  # fmt: skip
+    options = [GateOption(option_id="approve", label="Approve")]
+    prompt = QUESTION_PROMPTS[state["kind"]]
+    if state["kind"] == gates.SCREEN:
+        options.append(GateOption(option_id="drop", label="Drop selected papers"))
+        papers = (question_payload or {}).get("shortlist", [])
+        prompt += " Drop selected papers to continue without them."
+        for paper in papers:
+            prompt += (
+                f"\n{paper['paper_id']}: {paper.get('title') or 'Untitled'}"
+                f" ({paper.get('year')}); relevance={paper.get('relevance_score')},"
+                f" quality={paper.get('quality_score')}. {paper.get('reason') or ''}"
+            )
+    options.append(GateOption(option_id="reject", label="Reject"))
     return Gate(
         gate_id=state["gate_id"], kind="question", step_key=step_of(state["stage"]),
-        prompt=QUESTION_PROMPTS[state["kind"]], opened_at=state["opened_at"],
-        options=[GateOption(option_id="approve", label="Approve"),
-                 GateOption(option_id="reject", label="Reject")],
+        prompt=prompt, opened_at=state["opened_at"], options=options,
         default_option_id="approve",
     )  # fmt: skip
 
@@ -144,7 +158,7 @@ def map_event(event: Event, timeline: Timeline, ctx: MapContext) -> list[Envelop
         ids = [ctx.ids["hypotheses"]] if "hypotheses" in ctx.ids else []
         add(_envelope(
             "run.gate_opened", event, phase=timeline.phase,
-            payload=gate_of(state, ids).model_dump(mode="json"),
+            payload=gate_of(state, ids, ctx.question_payload).model_dump(mode="json"),
         ))  # fmt: skip
     elif kind == ev.GATE_RESOLVED:
         if data["kind"] == gates.HYPOTHESES:
@@ -179,11 +193,12 @@ def run_state(
     timeline: Timeline,
     last_seq: int,
     hypotheses_id: str | None,
+    question_payload: dict[str, Any] | None = None,
 ) -> RunState:
     gate_state = record.get("gate")
     finished = RunStatus(record["status"]).terminal  # a closed run waits for nobody
     open_gate = (
-        gate_of(gate_state, [hypotheses_id] if hypotheses_id else [])
+        gate_of(gate_state, [hypotheses_id] if hypotheses_id else [], question_payload)
         if gate_state and gate_state.get("status") == "open" and not finished
         else None
     )

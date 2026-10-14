@@ -219,6 +219,12 @@ class ContractRuns:
         await self.projector.project(run_id)
         record = self.store.read_run(run_id)
         meta = self.service.deliveries.read_meta(run_id) or {}
+        gate = record.get("gate") or {}
+        question_payload = (
+            gates.gate_payload(gates.gate_by_kind(gate["kind"]), self.store.artifacts(run_id))
+            if gate.get("status") == "open" and gate["kind"] == gates.SCREEN
+            else None
+        )
         return run_state(
             run_id,
             record,
@@ -226,6 +232,7 @@ class ContractRuns:
             self.projector.timeline(run_id),
             self.log.last_seq(run_id),
             self.publisher.latest_id(run_id, "i2h.hypotheses/v1"),
+            question_payload,
         )
 
     async def events(self, run_id: str, after: int, limit: int) -> list[dict[str, Any]]:
@@ -269,6 +276,11 @@ class ContractRuns:
             raise _invalid("an artifact review accepts approve or comment", "GATE_ACTION_INVALID")
         if body.action != "answer":
             raise _invalid("a question gate accepts answer", "GATE_ACTION_INVALID")
+        if body.option_id == "drop" and gate["kind"] == gates.SCREEN:
+            dropped = _id_list(body.params, "dropped")
+            if not dropped:
+                raise _invalid("drop needs at least one paper in params.dropped")
+            return CoreAnswer(gates.APPROVE, dropped, note)
         if body.option_id == "approve":
             return CoreAnswer(gates.APPROVE, _id_list(body.params, "dropped"), note)
         if body.option_id == "reject":

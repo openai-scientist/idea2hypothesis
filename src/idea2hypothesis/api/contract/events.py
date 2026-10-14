@@ -97,6 +97,7 @@ class ContractProjector:
         record = self.store.read_run(run_id)
         ctx.actors = dict(record.get("contract_gate_actors") or {})
         if event.type == ev.GATE_OPENED:
+            ctx.question_payload = event.data
             ctx.gate_state = self.store.read_checkpoint(run_id).get("gates", {}).get(
                 event.data.get("gate_id")
             )
