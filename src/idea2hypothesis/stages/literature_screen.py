@@ -48,8 +48,11 @@ def has_abstract(row: dict[str, Any]) -> bool:
 
 
 def keyword_overlap(blob: str, keywords: list[str]) -> int:
-    """How many keywords occur in ``blob`` as whole words ("ml" does not match "html")."""
-    return sum(1 for kw in keywords if re.search(rf"(?<!\w){re.escape(kw)}(?!\w)", blob))
+    """How many keywords occur in ``blob`` as whole words, plural allowed ("ml" does not match
+    "html"; "benchmark" matches "benchmarks")."""
+    return sum(
+        1 for kw in keywords if re.search(rf"(?<!\w){re.escape(kw)}(?:s|es)?(?!\w)", blob)
+    )
 
 
 def prefilter(

@@ -836,3 +836,10 @@ def test_a_field_naming_four_benchmarks_apart_quotes_each_place() -> None:
     assert check_card_quotes(card, abstract).ok
     card["quotes"] = {"data": quotes * 2}
     assert any("give at most 6" in e for e in check_card_quotes(card, abstract).errors)
+
+
+def test_prefilter_whole_word_match_allows_a_plural():
+    from idea2hypothesis.stages.literature_screen import keyword_overlap
+
+    assert keyword_overlap("two new benchmarks for dense retrieval", ["benchmark", "dense"]) == 2
+    assert keyword_overlap("an html parser", ["ml"]) == 0
