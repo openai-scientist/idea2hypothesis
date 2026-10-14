@@ -305,6 +305,11 @@ class ContractRuns:
             if body.action == "comment":
                 art = self.store.artifacts(run_id)
                 art.write_run_json(
+                    f"revision_before.r{int(record['attempt'])}.json",
+                    {"artifact_id": self.publisher.latest_id(run_id, "i2h.hypotheses/v1"),
+                     "markdown": art.read_text(8, "hypotheses.md")},
+                )
+                art.write_run_json(
                     f"researcher_findings.r{int(record['attempt'])}.json",
                     [f.model_dump(mode="json") for f in body.findings],
                 )

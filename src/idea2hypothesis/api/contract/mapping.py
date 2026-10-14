@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from idea2hypothesis.api.contract.capabilities import STEP_KEYS
 from idea2hypothesis.api.contract.models import (
     FailureInfo,
     Gate,
@@ -13,12 +12,56 @@ from idea2hypothesis.api.contract.models import (
     Phase,
     RunState,
 )
+from idea2hypothesis.api.contract.review import review_findings
+from idea2hypothesis.api.platform_events import RunView, map_core_event
 from idea2hypothesis.pipeline import events as ev
 from idea2hypothesis.pipeline import gates
 from idea2hypothesis.pipeline.events import Event
 from idea2hypothesis.pipeline.models import RunStatus, Stage
 
 Envelope = dict[str, Any]
+STEP_KEYS = tuple(stage.name.lower() for stage in Stage)
+
+# Only content is activity; run/stage/step/gate envelopes stay lifecycle.
+_ACTIVITY_LABELS = {
+    "scope.profile": "Assessed the available research resources",
+    "scope.goal": "Defined the research goal",
+    "scope.approved": "Approved the research scope",
+    "problem.subquestion": "Defined a research sub-question",
+    "problem.risk": "Identified a research risk",
+    "topic.evaluated": "Evaluated the research topic",
+    "search.strategy": "Defined a literature search strategy",
+    "search.query": "Prepared a literature query",
+    "search.sources": "Selected literature sources",
+    "literature.request": "Queried a literature source",
+    "literature.batch": "Received literature search results",
+    "literature.merged": "Merged duplicate literature records",
+    "literature.collected": "Completed literature collection",
+    "screen.criteria": "Defined paper screening criteria",
+    "screen.scored": "Scored candidate papers",
+    "screen.kept": "Kept a paper in the shortlist",
+    "screen.rejected": "Excluded a candidate paper",
+    "card.extracted": "Extracted an abstract-level evidence card",
+    "synthesis.cluster": "Grouped evidence cards",
+    "synthesis.set_aside": "Set aside evidence cards",
+    "synthesis.overview": "Synthesised the retrieved evidence",
+    "synthesis.tension": "Identified conflicting evidence",
+    "synthesis.gap": "Identified a research gap",
+    "synthesis.ranked": "Ranked research gaps",
+    "debate.turn": "Contributed to the hypothesis debate",
+    "hypothesis.drafted": "Drafted a falsifiable hypothesis",
+    "hypothesis.selected": "Selected a hypothesis",
+    "hypothesis.checked": "Assessed hypothesis novelty heuristically",
+    "idea.set_aside": "Set aside a hypothesis candidate",
+    "rule.checked": "Checked a hypothesis requirement",
+    "map.node": "Mapped a research entity",
+    "map.edge": "Mapped a research relationship",
+    "canvas.piece": "Updated the research canvas",
+    "agent.message": "Reported research progress",
+    "review.finding": "Reported an independent review finding",
+    "question.defaulted": "Applied the default answer to an optional question",
+}
+ACTIVITY_TYPES = tuple(f"i2h.{kind}" for kind in _ACTIVITY_LABELS)
 
 HYPOTHESES_PROMPT = (
     "Review the hypotheses and the independent review findings. Approve to publish them, "
@@ -64,6 +107,7 @@ class MapContext:
     ids: dict[str, str] = field(default_factory=dict)
     review: dict[str, Any] = field(default_factory=dict)
     question_payload: dict[str, Any] = field(default_factory=dict)
+    view: RunView | None = None
 
 
 def _envelope(
@@ -87,6 +131,86 @@ def _envelope(
 
 def step_of(stage: int | None) -> str | None:
     return STEP_KEYS[stage - 1] if stage and 1 <= stage <= len(STEP_KEYS) else None
+
+
+def _refs(payload: dict[str, Any]) -> list[str]:
+    """Record ids already present in the projected content, in stable encounter order."""
+    keys = {"paper_id", "card_id", "hypothesis_id", "artifact_id", "card_ids",
+            "hypothesis_ids", "evidence_refs", "sub_question_ids", "gap_id", "gap",
+            "sub_question", "tension_ids"}
+    containers = {"paper", "card", "hypothesis", "gap", "sub_question", "node", "points"}
+    found: list[str] = []
+
+    def visit(value: Any, parent: str = "") -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                link = parent in {"gap", "hypothesis", "edge"} and key in {"from", "to"}
+                if key in keys or link or (key == "id" and parent in containers):
+                    ids = item if isinstance(item, list) else [item]
+                    found.extend(v for v in ids if isinstance(v, str) and v)
+                if key == "locator" and isinstance(item, str) and item.startswith("hypothesis:"):
+                    found.append(item.removeprefix("hypothesis:").split("/", 1)[0])
+                visit(item, key)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item, parent)
+
+    visit(payload)
+    return list(dict.fromkeys(found))
+
+
+def _activity(
+    kind: str, payload: dict[str, Any], actor: str, event: Event, timeline: Timeline
+) -> Envelope:
+    refs = _refs(payload)
+    detail = payload.get("text") if kind == "agent.message" else None
+    summary = " ".join(str(detail or _ACTIVITY_LABELS[kind]).split()).rstrip(".!?")
+    if not detail and refs:
+        summary += f" ({', '.join(refs[:3])})"
+    summary = summary[:239].rstrip(".!? ") + "."
+    return {
+        "type": f"i2h.{kind}", "class": "activity", "occurred_at": event.timestamp,
+        "phase": timeline.phase, "step_key": step_of(event.stage), "actor": actor,
+        "summary": summary, "refs": refs, "payload": payload,
+    }
+
+
+def _activities(event: Event, timeline: Timeline, ctx: MapContext) -> list[Envelope]:
+    out: list[Envelope] = []
+    if ctx.view is not None and event.stage and event.type in {
+        ev.STAGE_STARTED, ev.STAGE_PROGRESS, ev.STAGE_COMPLETED, ev.STAGE_FAILED, ev.GATE_RESOLVED,
+    }:
+        for row in map_core_event(ctx.view, event):
+            kind = row["type"]
+            if kind not in _ACTIVITY_LABELS:
+                continue
+            if kind == "card.extracted" and _cached_card_reported(event, ctx.view):
+                continue
+            payload = row["payload"]
+            actor = (payload.get("turn") or {}).get("actor") or row.get("actor") or "i2h"
+            out.append(_activity(kind, payload, actor, event, timeline))
+        if (event.type == ev.STAGE_COMPLETED and ctx.view.flags.mode in {"auto", "light"}
+                and event.stage in {int(Stage.PROBLEM_DECOMPOSE), int(Stage.LITERATURE_SCREEN)}):
+            gate = gates.SCOPE if event.stage == int(Stage.PROBLEM_DECOMPOSE) else gates.SCREEN
+            out.append(_activity("question.defaulted", {"kind": gate, "option_id": "approve"},
+                                 "system", event, timeline))
+    if event.type == ev.REVIEW_COMPLETED:
+        findings = review_findings(ctx.review, artifact_id=ctx.ids["hypotheses"])
+        out.extend(_activity("review.finding", finding.model_dump(mode="json"),
+                             "reviewer", event, timeline) for finding in findings.findings)
+    return out
+
+
+def _cached_card_reported(event: Event, view: RunView) -> bool:
+    """A valid cached card reannounced by a retry is already on the append-only timeline."""
+    if event.type != ev.STAGE_PROGRESS or event.data.get("kind") != "card" or view.store is None:
+        return False
+    return any(
+        prior.seq < event.seq and prior.stage == event.stage and prior.attempt == event.attempt
+        and prior.type == ev.STAGE_PROGRESS and prior.data.get("kind") == "card"
+        and prior.data.get("card_id") == event.data["card_id"]
+        for prior in view.store.read_events(view.run_id)
+    )
 
 
 def gate_of(
@@ -119,7 +243,7 @@ def gate_of(
 
 
 def map_event(event: Event, timeline: Timeline, ctx: MapContext) -> list[Envelope]:
-    """Lifecycle envelopes for one core event; ``timeline`` advances with each envelope."""
+    """Lifecycle and content envelopes; ``timeline`` advances with each lifecycle envelope."""
     out: list[Envelope] = []
 
     def add(envelope: Envelope) -> None:
@@ -136,7 +260,7 @@ def map_event(event: Event, timeline: Timeline, ctx: MapContext) -> list[Envelop
         change_phase("drafting")
     elif kind == ev.STAGE_STARTED:
         step = step_of(event.stage)
-        if event.stage == int(Stage.HYPOTHESIS_GEN) and event.attempt > 1:
+        if event.stage == int(Stage.HYPOTHESIS_GEN) and timeline.phase == "awaiting_researcher":
             change_phase("revising")
         if step:
             payload = {"from": timeline.step}
@@ -183,7 +307,7 @@ def map_event(event: Event, timeline: Timeline, ctx: MapContext) -> list[Envelop
     elif kind == ev.RUN_COMPLETED:
         add(_envelope("run.published", event, phase="published",
                       payload={"artifact_id": ctx.ids["hypotheses"]}))  # fmt: skip
-    return out
+    return [*out, *_activities(event, timeline, ctx)]
 
 
 def run_state(

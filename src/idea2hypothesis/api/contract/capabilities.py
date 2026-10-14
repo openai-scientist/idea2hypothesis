@@ -1,6 +1,7 @@
 """Declarations for the i2h engine's published API."""
 
 from idea2hypothesis import __version__
+from idea2hypothesis.api.contract.mapping import ACTIVITY_TYPES, STEP_KEYS
 from idea2hypothesis.api.contract.models import (
     CONTRACT_VERSION,
     Capabilities,
@@ -8,10 +9,8 @@ from idea2hypothesis.api.contract.models import (
     ResearchProfile,
     StepInfo,
 )
-from idea2hypothesis.pipeline.models import Stage
 
 ENGINE_KEY = "i2h"
-STEP_KEYS = tuple(stage.name.lower() for stage in Stage)
 
 
 def capabilities() -> Capabilities:
@@ -36,5 +35,6 @@ def capabilities() -> Capabilities:
         optional_integrations=["semantic_scholar", "openalex"],
         providers=["openai_compatible"],
         auto_revision=False,
+        activity_types=list(ACTIVITY_TYPES),
         profiles=[ResearchProfile()],
     )

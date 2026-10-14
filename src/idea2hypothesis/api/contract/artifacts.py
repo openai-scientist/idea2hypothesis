@@ -7,11 +7,12 @@ import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from difflib import unified_diff
 from typing import Any
 
 import httpx
 
-from idea2hypothesis.api.contract.models import ArtifactMeta
+from idea2hypothesis.api.contract.models import ArtifactMeta, RevisionDiff
 from idea2hypothesis.api.contract.review import review_findings, revision_response
 from idea2hypothesis.api.webhooks import DeliveryManager, callback_key
 from idea2hypothesis.pipeline import events as ev
@@ -25,6 +26,7 @@ I2H_HYPOTHESES = "i2h.hypotheses/v1"
 REVIEW_FINDINGS = "review.findings/v1"
 ARGUMENT_MAP = "i2h.argument_map/v1"
 REVISION_RESPONSE = "revision.response/v1"
+REVISION_DIFF = "revision.diff/v1"
 REGISTRY = "pushed_artifacts.json"
 CALLBACK_ARTIFACTS = "/artifacts"
 JSON_TYPE = "application/json"
@@ -167,14 +169,28 @@ class ArtifactPublisher:
         After a revision round the generator's answer to the researcher's findings goes up too.
         """
         art = self.store.artifacts(run_id)
-        before = self.latest_id(run_id, I2H_HYPOTHESES)
         hypotheses_id = await self.push_hypotheses(run_id)
         review = art.read_json(8, "review.json")
-        if before and before != hypotheses_id and art.exists(8, "revision_responses.json"):
+        round_ = int(review["round"]) - 1
+        previous = art.read_run_json(f"revision_before.r{round_}.json")
+        if previous and art.exists(8, "revision_responses.json"):
+            before = previous["artifact_id"]
             answer = revision_response(
                 art.read_json(8, "revision_responses.json"),
-                round_=int(review["round"]) - 1, before=before, after=hypotheses_id,
+                round_=round_, before=before, after=hypotheses_id,
             )  # fmt: skip
+            diff = RevisionDiff(
+                round=round_, artifact_before=before, artifact_after=hypotheses_id,
+                patch="".join(unified_diff(
+                    previous["markdown"].splitlines(keepends=True),
+                    art.read_text(8, "hypotheses.md").splitlines(keepends=True),
+                    fromfile="before/hypotheses.md", tofile="after/hypotheses.md",
+                )),
+            )
+            await self.ensure_pushed(
+                run_id, REVISION_DIFF, _json_bytes(diff.model_dump(mode="json")),
+                filename="revision_diff.json", review_round=diff.round,
+            )
             await self.ensure_pushed(
                 run_id, REVISION_RESPONSE, _json_bytes(answer.model_dump(mode="json")),
                 filename="revision_response.json", review_round=answer.round,

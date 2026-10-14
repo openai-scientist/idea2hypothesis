@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "1.1.0"
 
 
 class ContractModel(BaseModel):
@@ -282,6 +282,14 @@ class RevisionResponse(ContractModel):
     artifact_before: str
     artifact_after: str
     items: list[RevisionItem]
+
+
+class RevisionDiff(ContractModel):
+    round: int = Field(ge=1)
+    artifact_before: str
+    artifact_after: str
+    format: Literal["unified"] = "unified"
+    patch: str
 
 
 class EventEnvelope(ContractModel):

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from idea2hypothesis.api.contract.artifacts import ArtifactPublisher, PushFailed
 from idea2hypothesis.api.contract.mapping import MapContext, Timeline, map_event
-from idea2hypothesis.api.platform_events import PlatformEventLog
+from idea2hypothesis.api.platform_events import PlatformEventLog, load_view
 from idea2hypothesis.pipeline import events as ev
 from idea2hypothesis.storage.runs import RunStore
 
@@ -94,6 +94,7 @@ class ContractProjector:
 
     async def _context(self, run_id: str, event: ev.Event) -> MapContext:
         ctx = MapContext(ids=await self.publisher.before(run_id, event))
+        ctx.view = load_view(self.store, run_id)
         record = self.store.read_run(run_id)
         ctx.actors = dict(record.get("contract_gate_actors") or {})
         if event.type == ev.GATE_OPENED:

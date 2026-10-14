@@ -51,13 +51,13 @@ async def test_light_run_reaches_awaiting_researcher(tmp_path):
         assert [e["type"] for e in review][-2:] == ["run.phase_changed", "run.gate_opened"]
 
 
-async def test_events_contiguous_and_lifecycle_only(tmp_path):
+async def test_events_contiguous_with_lifecycle_and_activity(tmp_path):
     async with contract_harness(tmp_path) as h:
         state = await h.reach(STAGE)
         events = h.platform.events[STAGE]
 
         assert [e["source_seq"] for e in events] == list(range(1, len(events) + 1))
-        assert {e["class"] for e in events} == {"lifecycle"}
+        assert {e["class"] for e in events} == {"lifecycle", "activity"}
         assert "review.completed" in h.platform.types(STAGE)
         completed = next(e for e in events if e["type"] == "review.completed")
         assert completed["payload"]["artifact_id"] == (

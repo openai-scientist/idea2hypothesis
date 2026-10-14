@@ -84,3 +84,20 @@ async def test_scope_rejects_screen_only_drop_option(tmp_path):
             "params": {"dropped": ["paper"]},
         })
         assert response.status_code == 422 and response.json()["code"] == "GATE_OPTION_INVALID"
+
+
+async def test_scope_rejection_keeps_first_hypotheses_in_drafting(tmp_path):
+    async with contract_harness(tmp_path) as h:
+        state = await h.reach(mode="full")
+        run_id = state["engine_run_id"]
+        await _answer(h, state, {"action": "answer", "option_id": "reject", "actor": "user"})
+        await h.settle()
+        revised_scope = await h.state(run_id)
+        assert revised_scope["open_gate"]["step_key"] == "problem_decompose"
+        await _answer(h, revised_scope,
+                      {"action": "answer", "option_id": "approve", "actor": "user"})
+        await h.settle()
+        screen = await h.state(run_id)
+        await _answer(h, screen, {"action": "answer", "option_id": "approve", "actor": "user"})
+        await h.settle()
+        assert h.platform.phases("stage-run-1") == ["drafting", "reviewing", "awaiting_researcher"]

@@ -14,7 +14,7 @@ EXAMPLES = Path(__file__).parent / "vendor" / "examples"
 
 #: Examples of wire models this engine has no use for yet (later slices add them).
 NOT_YET = {
-    "DatasetDescriptor", "LlmCall", "PipelineRecommendation", "RevisionDiff", "RunCost",
+    "DatasetDescriptor", "LlmCall", "PipelineRecommendation", "RunCost",
     "TelemetryBatch", "TelemetryRecord", "TokenUsage", "EmptyPayload", "PhaseChanged",
     "StepChanged", "ReviewCompleted", "GateClosed", "RunPublished", "ArtifactDelivered",
 }  # fmt: skip
