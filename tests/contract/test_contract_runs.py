@@ -179,3 +179,46 @@ async def test_stage_closed_cancels(tmp_path):
 
         state = await h.state(response.json()["engine_run_id"])
         assert state["phase"] == "cancelled"
+
+
+
+@pytest.mark.parametrize(
+    "guidance",
+    ["focus on trials", ["ok", 3], ["a" * 501], ["g"] * 21],
+)
+async def test_invalid_guidance_rejected(tmp_path, guidance):
+    async with contract_harness(tmp_path) as h:
+        params = {"topic": "x" * 20, "guidance": guidance}
+        response = await h.create(STAGE, inputs={"params": params})
+
+        assert response.status_code == 422 and response.json()["code"] == "VALIDATION_ERROR"
+        assert h.service.store.list_run_ids() == []
+
+
+async def test_guidance_and_feedback_join_constraints(tmp_path):
+    async with contract_harness(tmp_path, research={"constraints": ["no GPU"]}) as h:
+        inputs = {
+            "params": {"topic": "x" * 20, "guidance": ["Prefer RCTs", "  "]},
+            "feedback": [
+                {"source_stage_key": "experiment_plan", "note": "Too broad"},
+                {"source_stage_key": "experiment_plan", "note": None},
+            ],
+        }
+        response = await h.create(STAGE, inputs=inputs)
+        await h.settle()
+
+        run_id = response.json()["engine_run_id"]
+        assert h.service.store.read_run(run_id)["constraints"] == [
+            "no GPU",
+            "Research lead: Prefer RCTs",
+            "Feedback from a later stage: Too broad",
+        ]
+
+
+async def test_no_guidance_keeps_config_constraints(tmp_path):
+    async with contract_harness(tmp_path, research={"constraints": ["no GPU"]}) as h:
+        response = await h.create(STAGE)
+        await h.settle()
+
+        run_id = response.json()["engine_run_id"]
+        assert h.service.store.read_run(run_id)["constraints"] == ["no GPU"]

@@ -203,3 +203,12 @@ async def test_control_of_unknown_run_is_404(tmp_path, route):
         response = await h.client.post(f"/v1/runs/none/{route}")
 
         assert response.status_code == 404 and response.json()["code"] == "RUN_NOT_FOUND"
+
+
+async def test_contract_activity_never_uses_actor_pi(tmp_path):
+    async with contract_harness(tmp_path, review={"mode": "copilot"}) as h:
+        await h.reach(STAGE, mode="copilot")
+        actors = {e["actor"] for e in h.platform.events[STAGE] if e["class"] == "activity"}
+
+        assert actors and "pi" not in actors
+        assert "chair" in actors

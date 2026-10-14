@@ -188,6 +188,8 @@ def _activities(event: Event, timeline: Timeline, ctx: MapContext) -> list[Envel
                 continue
             payload = row["payload"]
             actor = (payload.get("turn") or {}).get("actor") or row.get("actor") or "i2h"
+            # ``pi`` is the Platform's research lead; i2h's own lead role is the chair.
+            actor = "chair" if actor == "pi" else actor
             out.append(_activity(kind, payload, actor, event, timeline))
         if (event.type == ev.STAGE_COMPLETED and ctx.view.flags.mode in {"auto", "light"}
                 and event.stage in {int(Stage.PROBLEM_DECOMPOSE), int(Stage.LITERATURE_SCREEN)}):

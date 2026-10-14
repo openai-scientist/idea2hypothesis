@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
 HYPOTHESIS_STAGE = "hypothesis"
 TOPIC_MIN, TOPIC_MAX, MAX_DOMAINS = 12, 2000, 6
+MAX_GUIDANCE_LINES, MAX_GUIDANCE_CHARS = 20, 500
 #: How long pause and cancel wait for the worker to reach a safe point before answering.
 SETTLE_TIMEOUT_SEC = 30.0
 ANSWER_KEYS = ("action", "option_id", "text", "findings", "params")
@@ -142,7 +143,7 @@ class ContractRuns:
         """Start (or find) the run of ``req.stage_run_id``; ``True`` when newly created."""
         if req.stage_key != HYPOTHESIS_STAGE:
             raise _invalid(f"stage_key {req.stage_key!r} is not served by this engine")
-        topic, domains = self._params(req)
+        topic, domains, lead_notes = self._params(req)
         try:
             events_url = validate_callback_url(req.callback_url, self.service.config.api)
         except CallbackRejected as exc:
@@ -172,9 +173,13 @@ class ContractRuns:
             )
             self._ids.add(run_id)
             self.services[run_id] = services
+            constraints = (
+                (*services.config.research.constraints, *lead_notes) if lead_notes else ()
+            )
             request = RunRequest(
                 topic=topic,
                 domains=tuple(domains),
+                constraints=constraints,
                 review_mode=req.interaction_mode,
                 run_id=run_id,
                 platform_run_id=req.stage_run_id,
@@ -185,7 +190,8 @@ class ContractRuns:
         return await self.state(run_id), True
 
     @staticmethod
-    def _params(req: RunCreateRequest) -> tuple[str, list[str]]:
+    def _params(req: RunCreateRequest) -> tuple[str, list[str], list[str]]:
+        """Topic, domains and the research-lead lines (guidance, then send-back feedback)."""
         params = req.inputs.params
         topic = params.get("topic")
         if not isinstance(topic, str) or not TOPIC_MIN <= len(topic.strip()) <= TOPIC_MAX:
@@ -197,7 +203,23 @@ class ContractRuns:
             or not all(isinstance(d, str) for d in domains)
         ):
             raise _invalid(f"inputs.params.domains must be at most {MAX_DOMAINS} strings")
-        return topic.strip(), [d.strip() for d in domains if d.strip()]
+        guidance = params.get("guidance", [])
+        if (
+            not isinstance(guidance, list)
+            or len(guidance) > MAX_GUIDANCE_LINES
+            or not all(isinstance(g, str) and len(g) <= MAX_GUIDANCE_CHARS for g in guidance)
+        ):
+            raise _invalid(
+                f"inputs.params.guidance must be at most {MAX_GUIDANCE_LINES} strings "
+                f"of at most {MAX_GUIDANCE_CHARS} characters"
+            )
+        notes = [f"Research lead: {g.strip()}" for g in guidance if g.strip()]
+        notes += [
+            f"Feedback from a later stage: {f.note.strip()}"
+            for f in req.inputs.feedback
+            if f.note and f.note.strip()
+        ]
+        return topic.strip(), [d.strip() for d in domains if d.strip()], notes
 
     def _services_for_request(self, req: RunCreateRequest) -> Services:
         services = services_for_request(self.base_services(), req.models, self.llm_factory)
