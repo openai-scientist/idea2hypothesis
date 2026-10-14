@@ -18,6 +18,7 @@ from idea2hypothesis.llm.models import ChatMessage, LLMResponse
 from tests.fixtures.fixture_literature import OFFTOPIC_MARK
 
 _MARKERS: list[tuple[str, str]] = [
+    ("Review the final set of hypotheses below", "hypothesis_review"),
     ("Create a SMART research goal as JSON", "topic_init"),
     ("Evaluate this research topic and its goal", "topic_evaluation"),
     ("Decompose this research problem", "problem_decompose"),
@@ -451,7 +452,22 @@ class FixtureLLM:
              "text": "same claim"}
             for c in cleared[3:]
         ]  # fmt: skip
-        return {"hypotheses": hypotheses, "not_used": not_used, "disagreements": ["effect size"]}
+        data = {"hypotheses": hypotheses, "not_used": not_used, "disagreements": ["effect size"]}
+        owed = re.findall(r"^- finding (\S+) at ", info.user, re.MULTILINE)
+        if owed:
+            data["revision_responses"] = [
+                {"finding_id": i, "outcome": "fixed", "note": "revised"} for i in owed
+            ]
+        return data
+
+    def _default_hypothesis_review(self, info: PromptInfo) -> dict[str, Any]:
+        """One minor finding on the first hypothesis of the set under review."""
+        hypotheses = info.section_json("Hypotheses under review", "Novelty report:")["hypotheses"]
+        return {"findings": [{
+            "hypothesis_id": hypotheses[0]["id"], "field": "prediction", "severity": "minor",
+            "category": "baseline", "kind": "fix", "issue": "name the comparison condition",
+            "suggestion": "state the baseline",
+        }]}  # fmt: skip
 
     def _default_argument_map(self, info: PromptInfo) -> dict[str, Any]:
         claims = info.section_json("Claims and their cards:\n", "Hypotheses:")

@@ -359,6 +359,22 @@ def test_a_tension_names_the_cards_on_each_of_its_two_sides() -> None:
     assert any("duplicate tension id X1" in e for e in twice.errors)
 
 
+def test_synthesis_names_the_unknown_card_ids_so_the_model_can_fix_them() -> None:
+    gap = {"id": "G1", "text": "t", "sub_question_ids": ["SQ1"], "card_ids": ["a", "g?"]}
+    syn = {
+        "clusters": [{"id": "C1", "title": "x", "card_ids": ["a", "x?"]}],
+        "set_aside": [{"card_ids": ["s?"], "reason": "r"}],
+        "gaps": [gap, gap | {"id": "G2"}],
+    }
+    errors = check_synthesis(syn, {"SQ1"}, {"a", "b"}, every_card=True).errors
+    for needle in (
+        "clusters[0] references unknown cards ['x?']",
+        "set_aside[0] references unknown cards ['s?']",
+        "gaps[0] references unknown cards ['g?']",
+    ):
+        assert any(needle in e for e in errors), needle
+
+
 def test_synthesis_checks_tensions_only_when_asked() -> None:
     gap = {"text": "t", "sub_question_ids": ["SQ1"], "card_ids": ["a"]}
     syn = {

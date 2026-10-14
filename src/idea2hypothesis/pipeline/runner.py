@@ -51,6 +51,9 @@ from idea2hypothesis.storage.runs import RunNotFoundError, utc_now
 
 logger = logging.getLogger(__name__)
 
+#: Result of the independent review, in the stage 8 folder.
+REVIEW_FILE = "review.json"
+
 MEMORY_FAILURE_CODES = frozenset(
     {"TOPIC_NOT_RESEARCHABLE", "TOPIC_BELOW_THRESHOLD", "NO_LITERATURE", "EMPTY_SHORTLIST"}
 )
@@ -163,6 +166,12 @@ def build_context(
             data={"kind": kind, "stage_run": stage_run, **data},
         )  # fmt: skip
 
+    async def on_phase(phase: str) -> None:
+        await _emit(
+            services, run_id, ev.PHASE_CHANGED, stage=int(stage), attempt=attempt,
+            data={"phase": phase},
+        )  # fmt: skip
+
     return StageContext(
         run_id=run_id,
         attempt=attempt,
@@ -182,6 +191,8 @@ def build_context(
         hardware=services.hardware,
         sleep=services.sleep,
         report=report,
+        review_phase=bool(record.get("review_phase")),
+        on_phase=on_phase,
     )
 
 
@@ -297,6 +308,7 @@ async def create_run(request: RunRequest, services: Services) -> str:
         "constraints": constraints,
         "platform_run_id": request.platform_run_id,
         "budget_usd": request.budget_usd,
+        "review_phase": request.review_phase,
         "current_stage": None,
         "pause_reason": None,
         "error": None,
@@ -434,7 +446,16 @@ async def _loop(run_id: str, services: Services) -> None:
                 return
             record = store.read_run(run_id)
 
-        spec = gates.gate_after(mode, stage)
+        review_phase = bool(record.get("review_phase"))
+        if (
+            review_phase
+            and stage is Stage.HYPOTHESIS_GEN
+            and not store.artifacts(run_id).exists(int(stage), REVIEW_FILE)
+            and not await _run_review(run_id, services, record, meter, llm, reviewer)
+        ):
+            return
+
+        spec = gates.gate_after(mode, stage, review_phase)
         if spec is not None:
             checkpoint = store.read_checkpoint(run_id)
             gate_id = gates.make_gate_id(spec, attempt)
@@ -506,11 +527,49 @@ async def _run_stage(
     return True
 
 
+async def _run_review(
+    run_id: str,
+    services: Services,
+    record: dict[str, Any],
+    meter: UsageMeter,
+    llm: MeteredLLM,
+    reviewer: MeteredLLM | None,
+) -> bool:
+    """Independent review of the final hypotheses; returns False when the run failed."""
+    from idea2hypothesis.stages import hypothesis_gen  # noqa: PLC0415 - avoids an import cycle
+
+    store = services.store
+    stage = Stage.HYPOTHESIS_GEN
+    attempt = int(record["attempt"])
+    context = build_context(run_id, stage, services, record=record, llm=llm, reviewer=reviewer)
+    try:
+        doc = await hypothesis_gen.review(context)
+    except StageFailure as exc:
+        await _fail_run(run_id, services, stage, StageError(exc.code, exc.message))
+        return False
+    except LLMError as exc:
+        await _fail_run(run_id, services, stage, StageError(_llm_code(exc), str(exc)))
+        return False
+    finally:
+        store.update_run(run_id, usage=meter.snapshot())
+    art = store.artifacts(run_id)
+    art.write_manifest(int(stage), run_id=run_id, attempt=attempt)
+    await _emit(
+        services, run_id, ev.REVIEW_COMPLETED, stage=int(stage), attempt=attempt,
+        data={"round": doc["round"], "passed": doc["passed"]},
+    )  # fmt: skip
+    return True
+
+
 async def _open_gate(
     run_id: str, services: Services, spec: gates.GateSpec, gate_id: str, attempt: int
 ) -> None:
     store = services.store
     payload = gates.gate_payload(spec, store.artifacts(run_id))
+    if spec.kind == gates.HYPOTHESES and store.artifacts(run_id).exists(8, REVIEW_FILE):
+        error = store.artifacts(run_id).read_json(8, REVIEW_FILE).get("error")
+        if error:
+            payload["review_error"] = error
     state = {
         "gate_id": gate_id, "kind": spec.kind, "stage": int(spec.after_stage), "attempt": attempt,
         "status": "open", "opened_at": utc_now(), "answer": None,
@@ -575,12 +634,14 @@ async def apply_gate_answer(
             empty_after_drop = remaining == 0
         update: dict[str, Any] = {"gate": resolved}
     else:
-        feedback_text = _rejection_feedback(spec, art, answer.note)
+        feedback_text = _rejection_feedback(
+            spec, art, answer.note, review_round=attempt if record.get("review_phase") else None
+        )
         art.invalidate_from(int(spec.rollback_to), attempt)
         for n in range(int(spec.rollback_to), len(STAGE_SEQUENCE) + 1):
             checkpoint["stages"].pop(str(n), None)
         # A gate before the rollback point stays answered: the stages it approved do not run again.
-        for earlier in gates.gates_for(record["review_mode"]):
+        for earlier in gates.gates_for(record["review_mode"], bool(record.get("review_phase"))):
             if earlier.after_stage >= spec.rollback_to:
                 continue
             state = checkpoint.get("gates", {}).get(gates.make_gate_id(earlier, attempt))
@@ -612,10 +673,24 @@ async def apply_gate_answer(
     return _result(services, run_id)
 
 
-def _rejection_feedback(spec: gates.GateSpec, art: Any, note: str) -> str:
+def _rejection_feedback(
+    spec: gates.GateSpec, art: Any, note: str, review_round: int | None = None
+) -> str:
     lines = ["Reviewer feedback on the previous attempt (address it in this attempt):"]
     if note.strip():
         lines.append(f"- {note.strip()}")
+    if spec.kind == gates.HYPOTHESES and review_round is not None:
+        findings = art.read_run_json(f"researcher_findings.r{review_round}.json") or []
+        for f in findings:
+            lines.append(
+                f"- finding {f['finding_id']} at {f['anchor']['locator']}: {f['issue']}"
+                + (f" Suggestion: {f['suggestion']}" if f.get("suggestion") else "")
+            )
+        if findings:
+            lines.append(
+                'For every finding above add an entry to "revision_responses": '
+                '[{"finding_id": "...", "outcome": "fixed|rebutted|not_fixed", "note": "..."}].'
+            )
     if spec.kind == gates.HYPOTHESES:
         try:
             doc = art.read_json(8, "hypotheses.json")

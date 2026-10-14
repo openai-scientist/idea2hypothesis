@@ -148,7 +148,7 @@ def _year_min(plan: dict[str, Any], previous: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/phase1/start", tags=[PHASE1], summary="Start all 8 stages in the background")
+@router.post("/api/phase1/start", tags=[PHASE1], summary="Start all 9 stages in the background")
 async def start_phase1(
     req: Phase1StartRequest, service: RunService = Depends(get_service)
 ) -> dict[str, Any]:
@@ -229,7 +229,7 @@ async def get_checkpoint(run_id: str, service: RunService = Depends(get_service)
 
 
 @router.get(
-    "/api/phase1/runs/{run_id}/health-overview", tags=[PHASE1], summary="Health of stages 1-8"
+    "/api/phase1/runs/{run_id}/health-overview", tags=[PHASE1], summary="Health of stages 1-9"
 )
 async def get_health_overview(
     run_id: str, service: RunService = Depends(get_service)

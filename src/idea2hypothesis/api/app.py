@@ -17,15 +17,21 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
 from idea2hypothesis import __version__
+from idea2hypothesis.api.contract import routes as contract_routes
+from idea2hypothesis.api.contract.errors import ContractError
+from idea2hypothesis.api.contract.llm import LlmFactory
 from idea2hypothesis.api.routes import bedrock, engine_runs, stages
 from idea2hypothesis.api.security import ServiceKeyMiddleware
 from idea2hypothesis.api.service import RunService, ServiceError
 from idea2hypothesis.config import Config, load_config
+from idea2hypothesis.llm.factory import build_llm
 from idea2hypothesis.pipeline.models import Services
 
 logger = logging.getLogger(__name__)
@@ -40,14 +46,20 @@ def create_app(
     services: Services | None = None,
     callback_transport: httpx.AsyncBaseTransport | None = None,
     sleep: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
+    llm_factory: LlmFactory = build_llm,
 ) -> FastAPI:
     """Build the application.
 
-    ``services``, ``callback_transport`` and ``sleep`` let tests inject the engine ports, the
-    webhook HTTP transport and the retry sleep; by default everything comes from ``config``.
+    ``services``, ``callback_transport``, ``sleep`` and ``llm_factory`` let tests inject the engine
+    ports, the webhook HTTP transport, the retry sleep and the builder of per-run model clients;
+    by default everything comes from ``config``.
     """
     service = RunService(
-        config, services=services, callback_transport=callback_transport, sleep=sleep
+        config,
+        services=services,
+        callback_transport=callback_transport,
+        sleep=sleep,
+        llm_factory=llm_factory,
     )
 
     @asynccontextmanager
@@ -82,11 +94,31 @@ def create_app(
     async def service_error(_: Request, exc: ServiceError) -> JSONResponse:
         return JSONResponse({"detail": exc.detail}, status_code=exc.status)
 
+    @app.exception_handler(ContractError)
+    async def contract_error(_: Request, exc: ContractError) -> JSONResponse:
+        return JSONResponse(exc.body(), status_code=exc.status)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        if not request.url.path.startswith("/v1"):
+            return await request_validation_exception_handler(request, exc)
+        # Never echo the submitted values (they may be credentials): only where and what.
+        details = [
+            {"loc": list(e["loc"]), "msg": str(e["msg"]), "type": str(e["type"])}
+            for e in exc.errors()
+        ]
+        return JSONResponse(
+            {"code": "VALIDATION_ERROR", "message": "request validation failed",
+             "details": details},
+            status_code=422,
+        )  # fmt: skip
+
     @app.get("/api/health", tags=["Health"], summary="Liveness")
     async def health() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
 
     app.include_router(engine_runs.router)
+    app.include_router(contract_routes.router, prefix="/v1")
     app.include_router(stages.router)
     app.include_router(bedrock.router)
     return app

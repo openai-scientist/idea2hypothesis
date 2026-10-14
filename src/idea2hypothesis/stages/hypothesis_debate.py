@@ -711,6 +711,10 @@ async def _reviews(
 
 
 async def _judge(ctx: StageContext, debate: Debate, warnings: list[str]) -> str:
+    if ctx.review_phase and ctx.reviewer is None:
+        raise StageFailure(
+            "REVIEWER_NOT_CONFIGURED", "a contract run needs a review model for the debate judge"
+        )
     judge = ctx.reviewer or ctx.llm
     debate.record["independent_judge"] = ctx.reviewer is not None
     if ctx.reviewer is None:

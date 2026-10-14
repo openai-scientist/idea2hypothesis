@@ -13,13 +13,18 @@ takes from each, and candidates that predict different effects are never merged.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from idea2hypothesis.literature.novelty import Judge, check_novelty
 from idea2hypothesis.pipeline.contracts import (
     EQUIVALENCE,
+    FINDING_CATEGORIES,
+    FINDING_KINDS,
+    FINDING_SEVERITIES,
     MIN_HYPOTHESES,
     PREDICTIONS,
+    REVISION_OUTCOMES,
     Findings,
     check_hypotheses,
     check_novelty_judgements,
@@ -497,10 +502,16 @@ async def run(ctx: StageContext) -> list[str]:
         max_hypotheses=str(research.max_hypotheses),
     )
 
+    owed = (
+        re.findall(r"^- finding (\S+) at ", ctx.feedback, re.MULTILINE) if ctx.review_phase else []
+    )
+
     def validate(data: dict[str, Any]) -> Findings:
         normalise_hypotheses(data)
         f = check_hypotheses(data, valid_gaps, valid_refs, valid_tensions)
         f.extend(check_merge(data, candidates, research.min_hypotheses, research.max_hypotheses))
+        if owed:
+            f.extend(_check_revision_responses(data, owed))
         return f
 
     await ctx.progress("merge", perspectives=sorted(debate.positions))
@@ -538,6 +549,10 @@ async def run(ctx: StageContext) -> list[str]:
         )
     ctx.artifacts.write_json(STAGE, "hypotheses.json", doc)
     ctx.artifacts.write_text(STAGE, "hypotheses.md", render_hypotheses_markdown(doc))
+    if owed:
+        ctx.artifacts.write_json(
+            STAGE, "revision_responses.json", {"items": data["revision_responses"]}
+        )
 
     if research.novelty_check:
         await ctx.progress("novelty", hypotheses=len(doc["hypotheses"]))
@@ -579,3 +594,104 @@ async def run(ctx: StageContext) -> list[str]:
                 f"with the run's own papers ({why})"
             )
     return [*warnings, *soft]
+
+
+def _check_revision_responses(data: dict[str, Any], owed: list[str]) -> Findings:
+    f = Findings()
+    items = data.get("revision_responses")
+    if not f.require(isinstance(items, list), "the answer needs a 'revision_responses' list"):
+        return f
+    answered: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict) or item.get("outcome") not in REVISION_OUTCOMES:
+            f.error(f"each revision response needs an outcome from {list(REVISION_OUTCOMES)}")
+            continue
+        answered.add(str(item.get("finding_id")))
+    missing = [i for i in owed if i not in answered]
+    f.require(not missing, f"revision_responses does not answer findings: {', '.join(missing)}")
+    return f
+
+
+def _check_review(data: Any, ids: set[str]) -> Findings:
+    f = Findings()
+    items = data.get("findings") if isinstance(data, dict) else None
+    if not f.require(isinstance(items, list), "the answer needs a 'findings' list"):
+        return f
+    for n, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            f.error(f"finding {n} is not an object")
+            continue
+        f.require(str(item.get("hypothesis_id")) in ids, f"finding {n}: unknown hypothesis_id")
+        f.require(_text(item.get("field")), f"finding {n}: 'field' is missing")
+        f.require(_text(item.get("issue")), f"finding {n}: 'issue' is missing")
+        f.require(item.get("severity") in FINDING_SEVERITIES, f"finding {n}: bad severity")
+        f.require(item.get("category") in FINDING_CATEGORIES, f"finding {n}: bad category")
+        f.require(item.get("kind") in FINDING_KINDS, f"finding {n}: bad kind")
+    return f
+
+
+async def review(ctx: StageContext) -> dict[str, Any]:
+    """One call of the review model on the final set; writes ``review.json`` and returns it.
+
+    When the reviewer cannot give a valid answer, ``review.json`` records the error and the
+    researcher decides (the gate opens with the error); nothing is invented in its place.
+    """
+    if ctx.reviewer is None:
+        raise StageFailure("REVIEWER_NOT_CONFIGURED", "the review phase needs a review model")
+    if ctx.on_phase is not None:
+        await ctx.on_phase("reviewing")
+    doc = ctx.artifacts.read_json(STAGE, "hypotheses.json")
+    ids = {str(h["id"]) for h in doc["hypotheses"]}
+    novelty = (
+        ctx.artifacts.read_json(STAGE, "novelty_report.json")
+        if ctx.artifacts.exists(STAGE, "novelty_report.json")
+        else None
+    )
+    view = {k: doc.get(k) for k in (
+        "hypotheses", "held_back", "not_used", "open_tensions", "disagreements"
+    )}  # fmt: skip
+    prompt = ctx.prompts.render(
+        "hypothesis_review",
+        topic=ctx.topic,
+        goal_json=compact_json(ctx.artifacts.read_json(1, "goal.json")),
+        hypotheses_json=compact_json(view),
+        novelty_json=compact_json(novelty) if novelty else "none",
+        cards_json=compact_json([_evidence_view(c) for c in load_cards(ctx)]),
+        categories=", ".join(FINDING_CATEGORIES),
+    )
+    reviewer_cfg = ctx.config.llm.reviewer
+    result: dict[str, Any] = {
+        "round": ctx.attempt,
+        "reviewer_model": reviewer_cfg.model if reviewer_cfg else "reviewer",
+        "findings": [],
+    }
+    try:
+        data, _ = await request_json(
+            ctx, prompt, label="hypothesis review", llm=ctx.reviewer,
+            validate=lambda d: _check_review(d, ids),
+        )  # fmt: skip
+        result["findings"] = [
+            {k: item.get(k) for k in (
+                "hypothesis_id", "field", "severity", "category", "kind", "issue", "suggestion"
+            )}
+            for item in data["findings"]
+        ]  # fmt: skip
+    except StageFailure as exc:
+        if exc.code != "LLM_OUTPUT_INVALID":
+            raise
+        result["error"] = exc.message
+    # Hard rule: a hypothesis whose fatal objection still stands is never passed unremarked.
+    blocked = {f["hypothesis_id"] for f in result["findings"] if f["severity"] == "blocking"}
+    for h in doc["hypotheses"]:
+        if h.get("contested") and str(h["id"]) not in blocked:
+            standing = "; ".join(f"{o['from']}: {o['text']}" for o in h["contested"])
+            result["findings"].append({
+                "hypothesis_id": str(h["id"]), "field": "statement", "severity": "blocking",
+                "category": "evidence", "kind": "needs_evidence", "issue": standing,
+                "suggestion": None,
+            })  # fmt: skip
+    result["passed"] = "error" not in result and not any(
+        f["severity"] == "blocking" for f in result["findings"]
+    )
+    ctx.artifacts.write_json(STAGE, "review.json", result)
+    return result

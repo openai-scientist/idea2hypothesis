@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -143,8 +143,13 @@ def build_literature(
     cache_root: Path | None = None,
     client: httpx.AsyncClient | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    api_keys: Mapping[str, str] | None = None,
 ) -> MultiSourceSearch:
-    """Create the configured providers; secrets are read from the named environment variables."""
+    """Create the configured providers; secrets are read from the named environment variables.
+
+    ``api_keys`` (provider name to key) replaces the environment: a source without an entry
+    runs without a key and no environment variable is read.
+    """
     http = client or httpx.AsyncClient(timeout=cfg.timeout_sec, follow_redirects=True)
     common: dict[str, Any] = {
         "timeout": cfg.timeout_sec,
@@ -158,7 +163,9 @@ def build_literature(
                 OpenAlexProvider(
                     http,
                     email=cfg.openalex_email,
-                    api_key=os.environ.get(cfg.openalex_api_key_env, "")
+                    api_key=api_keys.get("openalex", "")
+                    if api_keys is not None
+                    else os.environ.get(cfg.openalex_api_key_env, "")
                     if cfg.openalex_api_key_env
                     else "",
                     **common,
@@ -168,7 +175,11 @@ def build_literature(
             providers.append(
                 SemanticScholarProvider(
                     http,
-                    api_key=os.environ.get(cfg.s2_api_key_env, "") if cfg.s2_api_key_env else "",
+                    api_key=api_keys.get("semantic_scholar", "")
+                    if api_keys is not None
+                    else os.environ.get(cfg.s2_api_key_env, "")
+                    if cfg.s2_api_key_env
+                    else "",
                     **common,
                 )
             )

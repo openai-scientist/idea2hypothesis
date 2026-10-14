@@ -48,12 +48,15 @@ _MODE_GATES: dict[str, tuple[GateSpec, ...]] = {
 }
 
 
-def gates_for(mode: str) -> tuple[GateSpec, ...]:
-    return _MODE_GATES[mode]
+def gates_for(mode: str, review_phase: bool = False) -> tuple[GateSpec, ...]:
+    gates = _MODE_GATES[mode]
+    if review_phase and HYPOTHESES_GATE not in gates:
+        gates = (*gates, HYPOTHESES_GATE)
+    return gates
 
 
-def gate_after(mode: str, stage: Stage) -> GateSpec | None:
-    return next((g for g in gates_for(mode) if g.after_stage == stage), None)
+def gate_after(mode: str, stage: Stage, review_phase: bool = False) -> GateSpec | None:
+    return next((g for g in gates_for(mode, review_phase) if g.after_stage == stage), None)
 
 
 def gate_by_kind(kind: str) -> GateSpec:

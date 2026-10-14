@@ -30,6 +30,13 @@ EVIDENCE_SCOPES = ("abstract", "full_text")
 DECISIONS = (
     "kept", "rejected", "below_cutoff", "unscored", "prefiltered", "dropped_by_reviewer"
 )  # fmt: skip
+#: Review finding groups (the five rubric groups of the platform contract, plus two).
+FINDING_CATEGORIES = (
+    "leakage", "baseline", "control", "statistics", "reproducibility", "evidence", "other"
+)  # fmt: skip
+FINDING_SEVERITIES = ("blocking", "major", "minor")
+FINDING_KINDS = ("fix", "needs_evidence")
+REVISION_OUTCOMES = ("fixed", "rebutted", "not_fixed")
 CARD_FIELDS = ("problem", "method", "data", "metrics", "findings", "limitations")
 CARD_CONTENT_FIELDS = ("problem", "method", "findings", "limitations")
 #: Cards from this schema on back every filled field with quotes from the abstract.
@@ -408,9 +415,8 @@ def _set_aside_ids(f: Findings, raw: Any, known_cards: set[str]) -> list[str]:
             isinstance(item, dict) and _str_list(item.get("card_ids")) and _text(item.get("reason"))
         )
         if f.require(ok, f"set_aside[{i}] needs card_ids and a reason"):
-            f.require(
-                set(item["card_ids"]) <= known_cards, f"set_aside[{i}] references unknown cards"
-            )
+            unknown = sorted(set(item["card_ids"]) - known_cards)
+            f.require(not unknown, f"set_aside[{i}] references unknown cards {unknown}")
             ids += item["card_ids"]
     return ids
 
@@ -501,7 +507,8 @@ def check_synthesis(
             cluster_ids.add(str(cluster["id"]))
             ids = cluster.get("card_ids")
             if f.require(_str_list(ids), f"clusters[{i}] needs card_ids"):
-                f.require(set(ids) <= known_cards, f"clusters[{i}] references unknown cards")
+                unknown = sorted(set(ids) - known_cards)
+                f.require(not unknown, f"clusters[{i}] references unknown cards {unknown}")
                 placed += ids
     if every_card:
         placed += _set_aside_ids(f, synthesis.get("set_aside"), known_cards)
@@ -534,7 +541,8 @@ def check_synthesis(
                 f.require(set(sq) <= known_sq, f"gaps[{i}] references unknown sub-questions")
             ids = gap.get("card_ids")
             if f.require(_str_list(ids), f"gaps[{i}] must be connected to evidence cards"):
-                f.require(set(ids) <= known_cards, f"gaps[{i}] references unknown cards")
+                unknown = sorted(set(ids) - known_cards)
+                f.require(not unknown, f"gaps[{i}] references unknown cards {unknown}")
     if source_text:
         for number in unsupported_numbers(written_text(synthesis), source_text)[:5]:
             f.warn(f"synthesis mentions {number!r} which does not appear in any card")

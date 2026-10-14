@@ -4,12 +4,12 @@ Instructions for coding agents and humans working in this repository.
 
 ## Rules
 
-* **Do not use Astra unless the user explicitly asks for it.**
 * Never read, print or commit secrets. Configuration and snapshots hold only the *names* of
   environment variables and AWS profiles. Keep `.env` out of git; `.env.example` lists names only.
 * Never add fallback or fake output in `src/`. A missing model, credential or literature result must
   end in a clear error (`LLMConfigError`, `NO_LITERATURE`, `EMPTY_SHORTLIST`, ...), not a template.
-  Test doubles live only in `tests/fixtures/` and are named `Fixture*`.
+  Test doubles live only under `tests/`: the helpers in `tests/fixtures/` (`Fixture*` ports,
+  `FakePlatform`, `Harness`, `ContractHarness`) and `tests/contract/fake_platform.py`.
 * Do not add a CLI (`cli.py`, `__main__.py`, `[project.scripts]`). The API and the Python library
   are the entry points; `tools/` holds developer helpers only.
 * Do not commit or push unless the user asks. Do not rewrite history.
@@ -45,8 +45,10 @@ No `utils/` package and no catch-all `_helpers.py`: helpers sit next to the comp
 
 ## Commands
 
+Install is in [README.md](README.md#install). Tests must work offline. Run `ruff` and `pytest`
+before finishing a change.
+
 ```bash
-pip install -e ".[api,bedrock,dev]"
 python -m ruff check .
 python -m pytest -q
 python -m build
@@ -54,7 +56,28 @@ python tools/serve_api.py          # needs I2H_CONFIG or configs/example.yaml
 python tools/dashboard/server.py   # run viewer
 ```
 
-Run `ruff` and `pytest` before finishing a change. Tests must work offline.
+CI runs the same checks on Ubuntu and Windows (Python 3.11 and 3.13), audits the wheel (no tests,
+tools or runs; prompt YAML present) and imports the core wheel in an environment without extras.
+
+## Change rules
+
+* New stage output fields need a check in `pipeline/contracts.py` and an update to the stage prompt
+  in `prompts/stages.yaml`.
+* New configuration keys go through `config.py` (typed, unknown keys rejected) and
+  `configs/example.yaml`. Never add a key without a consumer.
+* Prompts are packaged assets. After editing YAML, `tests/unit/test_prompts.py` must pass and the
+  wheel must include the file.
+* Add a test with every change. Unit tests cover single components, `tests/integration/` runs the
+  pipeline with fixture ports, `tests/contracts/` checks stage artifacts and API contracts.
+
+## Platform contract tests
+
+`tests/contract/` runs the vendored management contract against the `/v1` service (see "Platform
+service" in the README). Run it with `python -m pytest tests/contract -q`. Management owns the
+contract. To refresh `tests/contract/vendor/`, copy `schema/`, `examples/` and `README.md` from
+`../management/docs/contract/` and write the management commit hash into `vendor/SOURCE`. Never edit
+the vendored files by hand. The vendored README describes the management repo; its commands do not
+apply here.
 
 ## Dependencies
 
@@ -64,5 +87,5 @@ and boto3 to `bedrock`; import them lazily or only under `api/` and `llm/bedrock
 
 ## Style
 
-Python 3.11+, type hints, ruff with line length 100, small functions, brief docstrings. JSON and
-JSONL files are written atomically (temporary file then `os.replace`) through `storage/`.
+Ruff with line length 100. JSON and JSONL files are written atomically (temporary file then
+`os.replace`) through `storage/`.
