@@ -77,7 +77,11 @@ def test_vendor_matches_management():
     source = Path(__file__).resolve().parents[3] / "management/docs/contract"
     if not source.is_dir():
         pytest.skip("Adjacent management contract documentation is absent")
-    expected = {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()}
+    # ``pi/`` is the PI service's contract; engines do not vendor it.
+    expected = {
+        p.relative_to(source): p.read_bytes()
+        for p in source.rglob("*") if p.is_file() and p.relative_to(source).parts[0] != "pi"
+    }
     actual = {
         p.relative_to(VENDOR): p.read_bytes()
         for p in VENDOR.rglob("*") if p.is_file() and p.name != "SOURCE"
