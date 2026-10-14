@@ -148,7 +148,7 @@ def _year_min(plan: dict[str, Any], previous: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/phase1/start", tags=[PHASE1], summary="Start all 8 stages in the background")
+@router.post("/api/phase1/start", tags=[PHASE1], summary="Start all 9 stages in the background")
 async def start_phase1(
     req: Phase1StartRequest, service: RunService = Depends(get_service)
 ) -> dict[str, Any]:
