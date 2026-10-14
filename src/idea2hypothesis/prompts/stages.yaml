@@ -318,7 +318,8 @@ stages:
         0.00-0.44 no abstract, no venue, or not clearly scholarly work.
       Write scores with two decimals (for example 0.83 or 0.71) and place each paper within its
       band; do not round to steps of 0.05 or 0.1. "decision" is "keep" or "reject". Give a
-      one-sentence "reason" for every paper (do not start it with "Kept because").
+      one-sentence "reason" for every kept paper (do not start it with "Kept because"). For a
+      rejected paper the "reason" is at most 12 words.
 
       {{> json_rules}}
       Schema:

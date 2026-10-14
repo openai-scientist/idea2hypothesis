@@ -112,6 +112,7 @@ def test_reliability_rules_are_in_the_prompts() -> None:
     assert "researchable" in topic.user and "Wi-Fi" in topic.system  # out-of-scope guard
     screen = loader.render("literature_screen", **STAGE_VARIABLES["literature_screen"])
     assert "false_friend" in screen.user
+    assert "at most 12 words" in screen.user
     assert "staleness" in screen.system  # polysemy example
     hyp = loader.render("hypothesis_gen", **STAGE_VARIABLES["hypothesis_gen"])
     for needle in ("FALSIFIABLE", "EVIDENCE-LED DIRECTION", "DISTINCT MECHANISMS", "TRACEABLE"):
