@@ -574,6 +574,13 @@ def test_the_final_set_uses_a_fatal_candidate_only_to_reach_the_minimum() -> Non
     )
     assert any("write between 2 and 6" in e for e in merge(["innovator-2"]))
     assert any("must list the candidate ids" in e for e in merge([], ["innovator-2"]))
+    # a held-back candidate listed in not_used is dropped: held_back already records it
+    from idea2hypothesis.stages.hypothesis_gen import drop_redundant_not_used
+
+    held = {"candidate": "innovator-1", "reason": "over_limit", "text": "fatal objection"}
+    data = {"hypotheses": [{"id": "H1", "from": ["innovator-2"]}], "not_used": [held]}
+    drop_redundant_not_used(data, candidates)
+    assert data["not_used"] == []
 
 
 def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why() -> None:
@@ -646,6 +653,16 @@ def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why(
         [one, rest[0]], [lead], lead_directed=directed(framing)
     )
     assert "is used by the set" in errors([one, *rest], [{**dup, "candidate": "pragmatist-1"}])
+    # the merge drops such entries before the check instead of asking for a repair
+    from idea2hypothesis.stages.hypothesis_gen import drop_redundant_not_used
+
+    redundant = {"hypotheses": [one, *rest], "not_used": [{**dup, "candidate": "pragmatist-1"}]}
+    drop_redundant_not_used(redundant, candidates)
+    assert redundant["not_used"] == []
+    assert check_merge(redundant, candidates, 2, 6).ok
+    unknown = {"hypotheses": [one, *rest], "not_used": [{**dup, "candidate": "ghost-1"}]}
+    drop_redundant_not_used(unknown, candidates)
+    assert "is used by the set" in " | ".join(check_merge(unknown, candidates, 2, 6).errors)
     assert "say why in text" in errors([one, rest[0]], [{**dup, "text": ""}])
     # a duplicate repeats the claim of the hypothesis it names
     sign_clash = errors([one, rest[0]], [{**dup, "of": "H2"}])

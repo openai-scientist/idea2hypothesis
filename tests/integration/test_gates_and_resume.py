@@ -410,6 +410,27 @@ async def test_a_standing_fatal_objection_holds_a_candidate_back(tmp_path: Path)
     assert opened[-1].data["held_back"][0]["candidate"] == "innovator-1"
 
 
+async def test_a_merge_that_lists_used_or_held_back_candidates_needs_no_repair(
+    tmp_path: Path,
+) -> None:
+    def merge(info):
+        data = FixtureLLM._default_hypothesis_gen(llm, info)
+        used = data["hypotheses"][0]["from"][0]
+        extra = [{"candidate": c, "reason": "duplicate", "of": "H1", "text": "same claim"}
+                 for c in (used, "innovator-1")]  # fmt: skip
+        data["not_used"] = [*data["not_used"], *extra]
+        return data
+
+    llm = FixtureLLM(overrides={"debate_review": _blocking_review, "hypothesis_gen": merge})
+    services, at_gate = await _at_hypotheses_gate(tmp_path, llm)
+    assert llm.count("hypothesis_gen") == 1
+    doc = services.store.artifacts(at_gate.run_id).read_json(8, "hypotheses.json")
+    used = {c for h in doc["hypotheses"] for c in h["from"]}
+    assert not used & {u["candidate"] for u in doc["not_used"]}
+    assert "innovator-1" not in {u["candidate"] for u in doc["not_used"]}
+    assert [b["candidate"] for b in doc["held_back"]] == ["innovator-1"]
+
+
 async def test_the_reviewer_drops_hypotheses_and_keeps_a_held_back_one(tmp_path: Path) -> None:
     llm = FixtureLLM(overrides={"debate_review": _blocking_review})
     services, at_gate = await _at_hypotheses_gate(tmp_path, llm)

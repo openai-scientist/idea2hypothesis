@@ -408,6 +408,26 @@ def _held_back(hypotheses: list[dict[str, Any]], candidates: dict[str, Candidate
     ]
 
 
+def drop_redundant_not_used(data: Any, candidates: dict[str, Candidate]) -> None:
+    """Drop not_used entries for candidates the set uses or a fatal objection holds back: code
+    already records both, so a repair round for them is wasted (live: 9 of 23 rejected merges)."""
+    items = data.get("hypotheses") if isinstance(data, dict) else None
+    raw = data.get("not_used") if isinstance(data, dict) else None
+    if not (isinstance(items, list) and isinstance(raw, list)):
+        return
+    used = {
+        x
+        for h in items
+        if isinstance(h, dict) and isinstance(h.get("from"), list)
+        for x in h["from"]
+        if isinstance(x, str)
+    }
+    accounted = used | {c.id for c in candidates.values() if c.fatal}
+    data["not_used"] = [
+        e for e in raw if not (isinstance(e, dict) and e.get("candidate") in accounted)
+    ]
+
+
 def _not_used(data: dict[str, Any], candidates: dict[str, Candidate]) -> list[dict[str, Any]]:
     """Candidates with no fatal objection standing that the set leaves out, with the reason."""
     out = []
@@ -556,6 +576,7 @@ async def run(ctx: StageContext) -> list[str]:
 
     def validate(data: dict[str, Any]) -> Findings:
         normalise_hypotheses(data)
+        drop_redundant_not_used(data, candidates)
         f = check_hypotheses(data, valid_gaps, valid_refs, valid_tensions)
         f.extend(
             check_merge(
