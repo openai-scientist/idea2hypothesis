@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
@@ -108,6 +109,21 @@ Phase = Literal[
 ]  # fmt: skip
 InteractionMode = Literal["auto", "light", "copilot", "full"]
 Severity = Literal["blocking", "major", "minor"]
+
+LIFECYCLE_TYPES = frozenset(
+    {
+        "run.phase_changed",
+        "run.step_changed",
+        "run.gate_opened",
+        "run.gate_closed",
+        "review.completed",
+        "artifact.delivered",
+        "run.published",
+        "run.failed",
+        "run.cancelled",
+        "run.cost",
+    }
+)
 FindingKind = Literal["fix", "needs_evidence"]
 FindingCategory = Literal[
     "leakage", "baseline", "control", "statistics", "reproducibility", "evidence", "other"
@@ -207,6 +223,17 @@ class Gate(ContractModel):
     default_option_id: str | None = None
     artifact_ids: list[str] = Field(default_factory=list)
 
+    # The Platform enforces this rule and JSON Schema cannot express it.
+    @model_validator(mode="after")
+    def validate_gate(self) -> Gate:
+        if self.kind == "question":
+            ids = [option.option_id for option in self.options]
+            if not 2 <= len(ids) <= 4 or self.default_option_id not in ids:
+                raise ValueError("question requires 2-4 options and a default in those options")
+        elif self.options or not self.artifact_ids:
+            raise ValueError("artifact_review requires artifact_ids and no options")
+        return self
+
 
 class FailureInfo(ContractModel):
     code: str
@@ -223,6 +250,13 @@ class RunState(ContractModel):
     failure: FailureInfo | None = None
     cost_usd: float | str = "0"
     last_source_seq: int = Field(default=0, ge=0)
+
+    # The Platform enforces this rule and JSON Schema cannot express it.
+    @model_validator(mode="after")
+    def validate_failure(self) -> RunState:
+        if (self.phase == "failed") != (self.failure is not None):
+            raise ValueError("failure is required exactly when phase is failed")
+        return self
 
 
 class Anchor(ContractModel):
@@ -270,11 +304,25 @@ class ReviewFindings(ContractModel):
     findings: list[Finding]
     passed: bool
 
+    # The Platform enforces this rule and JSON Schema cannot express it.
+    @model_validator(mode="after")
+    def validate_passed(self) -> ReviewFindings:
+        if self.passed != (not any(f.severity == "blocking" for f in self.findings)):
+            raise ValueError("passed must match absence of blocking findings")
+        return self
+
 
 class RevisionItem(ContractModel):
     finding_id: str
     outcome: Literal["fixed", "rebutted", "not_fixed"]
     note: str | None = None
+
+    # The Platform enforces this rule and JSON Schema cannot express it.
+    @model_validator(mode="after")
+    def validate_note(self) -> RevisionItem:
+        if self.outcome != "fixed" and not (self.note and self.note.strip()):
+            raise ValueError("rebutted and not_fixed require a note")
+        return self
 
 
 class RevisionResponse(ContractModel):
@@ -303,6 +351,36 @@ class EventEnvelope(ContractModel):
     summary: str | None = None
     refs: list[str] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    # The Platform enforces this rule and JSON Schema cannot express it.
+    @model_validator(mode="after")
+    def validate_event(self) -> EventEnvelope:
+        if self.class_ == "activity":
+            if self.type in LIFECYCLE_TYPES or not re.fullmatch(
+                r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_.]*", self.type
+            ):
+                raise ValueError("activity type requires an engine prefix")
+            if not all(v and v.strip() for v in (self.step_key, self.actor, self.summary)):
+                raise ValueError("activity requires step_key, actor and summary")
+            return self
+        if self.type not in LIFECYCLE_TYPES:
+            raise ValueError("unknown lifecycle type")
+        if self.type in {"run.phase_changed", "run.gate_opened"} and self.phase is None:
+            raise ValueError("phase is required")
+        if self.type == "run.step_changed" and not self.step_key:
+            raise ValueError("step_key is required")
+        terminal = {
+            "run.published": "published",
+            "run.failed": "failed",
+            "run.cancelled": "cancelled",
+        }
+        if self.type in terminal and self.phase != terminal[self.type]:
+            raise ValueError("terminal event phase does not match type")
+        if self.type == "run.gate_opened":
+            Gate.model_validate(self.payload)
+        elif self.type == "run.failed":
+            FailureInfo.model_validate(self.payload)
+        return self
 
 
 class EventBatch(ContractModel):

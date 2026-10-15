@@ -326,11 +326,17 @@ def run_state(
     open_gate = (
         gate_of(gate_state, [hypotheses_id] if hypotheses_id else [], question_payload)
         if gate_state and gate_state.get("status") == "open" and not finished
+        # A review gate shows only once its hypotheses reached the Platform (an upload may
+        # still be retrying); without them it is not a valid gate.
+        and (gate_state.get("kind") != gates.HYPOTHESES or hypotheses_id)
         else None
     )
     error = record.get("error")
     cost = (record.get("usage") or {}).get("cost_usd")
     phase: Phase = timeline.phase or "drafting"  # type: ignore[assignment]
+    # The record holds the error before the run.failed envelope is projected; the wire shows
+    # a failure only once the phase says so.
+    failed = error and phase == "failed"
     return RunState(
         engine_run_id=run_id,
         stage_run_id=str(meta["stage_run_id"]),
@@ -338,7 +344,7 @@ def run_state(
         step_key=timeline.step,
         waiting_input=open_gate is not None,
         open_gate=open_gate,
-        failure=FailureInfo(code=error["code"], message=error["message"]) if error else None,
+        failure=FailureInfo(code=error["code"], message=error["message"]) if failed else None,
         cost_usd="0" if cost is None else float(cost),
         last_source_seq=last_seq,
     )
