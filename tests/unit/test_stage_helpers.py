@@ -917,6 +917,7 @@ def test_a_review_revision_keeps_the_hypotheses_no_finding_concerns():
     text = _rejection_feedback(spec, _FeedbackArtifacts(), "", review_round=1)
     assert "finding f1 at H2" in text
     assert "no finding above concerns unchanged (same id, same statement)" in text
+    assert "Every previous id stays in the set" in text and "never drop it" in text
     assert "H1: A raises B" in text
     assert "write a better set" not in text
 

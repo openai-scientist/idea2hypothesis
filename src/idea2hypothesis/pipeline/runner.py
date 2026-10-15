@@ -737,8 +737,10 @@ def _rejection_feedback(
             elif review_round is not None:
                 lines.append(
                     "- Keep every hypothesis that no finding above concerns unchanged (same id, "
-                    "same statement); change only what the findings require. Previous "
-                    f"hypotheses: {previous}"
+                    "same statement). Every previous id stays in the set, also one a finding "
+                    "concerns: revise it in place, never drop it or merge it into another, and "
+                    "change only what its findings require (keep its predicted direction unless "
+                    f"a finding is about the direction). Previous hypotheses: {previous}"
                 )
             else:
                 lines.append(
