@@ -72,7 +72,7 @@ async def test_prior_engine_run_is_reused_and_announced(tmp_path):
         keys.clear()
         body = run_body("stage-run-2", platform_run_id="platform-run-1")
         body["inputs"] = {
-            "params": {"topic": TOPIC, "domains": [], "guidance": ["Tighten H1"]},
+            "params": {"topic": TOPIC, "domains": [], "guidance": ["Handoff: Tighten H1"]},
             "prior_engine_run_id": first["engine_run_id"],
         }
         created = await h.client.post("/v1/runs", json=body)
@@ -141,3 +141,48 @@ async def test_unknown_domains_keep_the_default_roles(tmp_path):
     systems = await _perspective_systems(tmp_path, domains=["education", "psychology"])
 
     assert systems and not any("software engineering" in s for s in systems)
+
+
+async def test_request_domain_selects_roles_but_not_stage_prompt_overrides(tmp_path):
+    seen: dict[str, set[str]] = {"perspective": set(), "hypothesis_gen": set()}
+
+    def record(info) -> None:
+        if info.key in seen:
+            seen[info.key].add(info.system)
+
+    async with contract_harness(tmp_path, on_call=record) as h:
+        body = run_body(STAGE)
+        body["inputs"] = {"params": {"topic": TOPIC, "domains": ["Biology"]}}
+        created = await h.client.post("/v1/runs", json=body)
+        await h.settle()
+        assert created.status_code == 201, created.text
+
+    assert any("metabolic-model builder" in s for s in seen["perspective"])
+    assert seen["hypothesis_gen"] and not any("COBRApy" in s for s in seen["hypothesis_gen"])
+
+
+async def test_evidence_failure_does_not_fail_the_hypotheses_push(tmp_path, monkeypatch):
+    from idea2hypothesis.api.contract import artifacts
+
+    async with contract_harness(tmp_path) as h:
+        state = await h.reach(STAGE)
+
+        def broken(*args, **kwargs):
+            raise ValueError("no evidence")
+
+        monkeypatch.setattr(artifacts, "evidence_document", broken)
+        pushed = await h.service.contract.publisher.push_hypotheses(state["engine_run_id"])
+
+        assert pushed == h.service.contract.publisher.latest_id(
+            state["engine_run_id"], "i2h.hypotheses/v1"
+        )
+
+
+def test_evidence_document_skips_cards_without_card_id():
+    from idea2hypothesis.api.contract.artifacts import evidence_document
+
+    doc = evidence_document(
+        [{"id": "H1", "evidence_refs": ["c1"]}], [{"title": "x"}, {"card_id": "c1"}]
+    )
+
+    assert [c["card_id"] for c in doc["cards"]] == ["c1"]

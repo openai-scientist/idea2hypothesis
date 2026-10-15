@@ -86,7 +86,7 @@ def evidence_document(
     hypotheses: list[dict[str, Any]], cards: list[dict[str, Any]]
 ) -> dict[str, Any]:
     """The knowledge cards the published hypotheses cite, each with the hypotheses citing it."""
-    by_id = {str(c["card_id"]): c for c in cards}
+    by_id = {str(c["card_id"]): c for c in cards if c.get("card_id")}
     cited: dict[str, list[str]] = {}
     for h in hypotheses:
         for ref in h.get("evidence_refs") or []:
@@ -192,15 +192,18 @@ class ArtifactPublisher:
             run_id, I2H_HYPOTHESES, _json_bytes({"schema": I2H_HYPOTHESES, **doc}),
             filename="hypotheses.json", primary=True,
         )  # fmt: skip
-        cards = [
-            art.read_json(6, name)
-            for name in art.list_files(6)
-            if name.startswith("cards/") and name.endswith(".json")
-        ]
-        await self.ensure_pushed(
-            run_id, I2H_EVIDENCE, _json_bytes(evidence_document(doc["hypotheses"], cards)),
-            filename="evidence.json",
-        )
+        try:
+            cards = [
+                art.read_json(6, name)
+                for name in art.list_files(6)
+                if name.startswith("cards/") and name.endswith(".json")
+            ]
+            await self.ensure_pushed(
+                run_id, I2H_EVIDENCE, _json_bytes(evidence_document(doc["hypotheses"], cards)),
+                filename="evidence.json",
+            )
+        except Exception:  # noqa: BLE001 - the evidence is optional; the hypotheses are delivered
+            logger.exception("run %s: the evidence artifact was not delivered", run_id)
         return artifact_id
 
     async def push_review(self, run_id: str) -> dict[str, str]:

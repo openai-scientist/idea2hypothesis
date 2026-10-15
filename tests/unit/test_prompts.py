@@ -241,3 +241,11 @@ def test_run_domain_takes_the_first_name_with_a_role_set() -> None:
     assert run_domain(["education", " SE ", "hep"], "ml") == "se"
     assert run_domain(["education", "psychology", ""], "biology") == "biology"
     assert run_domain([], "ml") == "ml"
+
+
+def test_roles_domain_changes_only_the_roles() -> None:
+    loader = PromptLoader("ml", roles_domain="biology")
+
+    assert loader.role_names() == PromptLoader("biology").role_names()
+    stage = loader.render("hypothesis_gen", **STAGE_VARIABLES["hypothesis_gen"]).system
+    assert "COBRApy" not in stage

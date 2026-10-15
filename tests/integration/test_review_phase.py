@@ -242,6 +242,26 @@ async def test_later_findings_are_minor_and_marked(tmp_path: Path) -> None:
     assert "resolutions" not in review
 
 
+async def test_missing_due_means_now_and_needs_evidence_is_never_later(tmp_path: Path) -> None:
+    def answer(info: object) -> dict:
+        no_due = _finding("H1", "blocking", issue="no baseline")
+        del no_due["due"]
+        later_evidence = {
+            **_finding("H2", "blocking", due="later", issue="no source"), "kind": "needs_evidence"
+        }
+        return {"findings": [no_due, later_evidence]}
+
+    reviewer = FixtureLLM(overrides={"hypothesis_review": answer})
+    services = _services(tmp_path, reviewer=reviewer)
+    result = await run_pipeline(request(review_phase=True), services)
+
+    review = services.store.artifacts(result.run_id).read_json(8, "review.json")
+    assert "error" not in review
+    assert [(f["issue"], f["severity"]) for f in review["findings"]] == [
+        ("no baseline", "blocking"), ("no source", "blocking")
+    ]  # fmt: skip
+
+
 async def test_second_round_checks_the_fixes_and_does_not_move_the_target(tmp_path: Path) -> None:
     llm = FixtureLLM(overrides={"hypothesis_gen": _revise_h1})
     reviewer = FixtureLLM(overrides={"hypothesis_review": _two_round_reviewer})

@@ -78,12 +78,26 @@ def run_domain(names: Sequence[str], default: str) -> str:
 
 
 class PromptLoader:
-    """Resolves prompts for one domain, with optional user override file."""
+    """Resolves prompts for one domain, with optional user override file.
 
-    def __init__(self, domain: str = "ml", override_file: str | Path | None = None) -> None:
-        if domain not in DOMAINS:
-            raise PromptError(f"unknown prompt domain {domain!r}; expected one of {list(DOMAINS)}")
+    ``roles_domain`` (default ``domain``) picks only the hypothesis role set; stage prompt
+    overrides follow ``domain`` alone.
+    """
+
+    def __init__(
+        self,
+        domain: str = "ml",
+        override_file: str | Path | None = None,
+        roles_domain: str | None = None,
+    ) -> None:
+        roles_domain = roles_domain or domain
+        for name in (domain, roles_domain):
+            if name not in DOMAINS:
+                raise PromptError(
+                    f"unknown prompt domain {name!r}; expected one of {list(DOMAINS)}"
+                )
         self.domain = domain
+        self.roles_domain = roles_domain
         self.override_file = str(override_file) if override_file else ""
 
         base = _read_package_yaml("stages.yaml")
@@ -96,9 +110,9 @@ class PromptLoader:
         }
 
         roles_file = _read_package_yaml("hypothesis_roles.yaml")
-        roles = (roles_file.get("roles") or {}).get(domain)
+        roles = (roles_file.get("roles") or {}).get(roles_domain)
         if not roles:
-            raise PromptError(f"hypothesis_roles.yaml has no roles for domain {domain!r}")
+            raise PromptError(f"hypothesis_roles.yaml has no roles for domain {roles_domain!r}")
         self._roles: dict[str, dict[str, Any]] = {
             name: _validate_entry(name, entry, "hypothesis_roles.yaml")
             for name, entry in roles.items()
@@ -222,6 +236,7 @@ class PromptLoader:
         """Template texts and a content hash, stored with each run for reproducibility."""
         content = {
             "domain": self.domain,
+            "roles_domain": self.roles_domain,
             "override_file": self.override_file,
             "prompts": copy.deepcopy(self._prompts),
             "blocks": dict(self._blocks),

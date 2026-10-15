@@ -14,6 +14,7 @@ and resuming continues from the checkpoint.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -349,15 +350,20 @@ async def _reuse_prior_run(
     """Adopt stages 1-7 of the request's prior run; returns why it could not, else ``None``."""
     if not request.prior_run_id:
         return None
-    why = reuse.problem(services.store, request.prior_run_id, topic)
-    if why is None:
-        try:
-            reuse.adopt(
-                services.store, request.prior_run_id, run_id, mode=mode,
-                review_phase=request.review_phase,
+    try:
+        why = reuse.problem(
+            services.store, request.prior_run_id, topic,
+            list(request.domains or services.config.research.domains),
+            list(request.constraints or services.config.research.constraints),
+        )  # fmt: skip
+        if why is None:
+            await asyncio.to_thread(
+                reuse.adopt, services.store, request.prior_run_id, run_id,
+                mode=mode, review_phase=request.review_phase,
             )  # fmt: skip
-        except OSError as exc:
-            why = f"its files could not be copied: {exc}"
+    except Exception:  # noqa: BLE001 - the run falls back to every stage
+        logger.exception("run %s: prior run %s could not be reused", run_id, request.prior_run_id)
+        why = "the prior run's files could not be copied"
     return why
 
 

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
+from idea2hypothesis.pipeline import reuse
 from idea2hypothesis.pipeline.models import GateAnswer, RunStatus
 from idea2hypothesis.pipeline.runner import answer_gate, run_pipeline
 from tests.conftest import make_config, make_services, request
@@ -132,3 +134,81 @@ async def test_reused_run_does_not_ask_the_earlier_questions_again(tmp_path: Pat
     opened = [e.data["kind"] for e in services.store.read_events(second.run_id)
               if e.type == "gate.opened"]  # fmt: skip
     assert opened == ["hypotheses"]
+
+
+async def _second_run(tmp_path: Path, first_kwargs: dict, second_kwargs: dict):
+    services = _services(tmp_path)
+    first = await run_pipeline(request(review_phase=True, **first_kwargs), services)
+    services.llm = services.reviewer = fresh = FixtureLLM()
+    second = await run_pipeline(
+        request(review_phase=True, prior_run_id=first.run_id, **second_kwargs), services
+    )
+    assert second.status is RunStatus.AWAITING_REVIEW, second.error
+    return services, fresh, second, first
+
+
+async def test_prior_run_with_other_domains_is_not_reused(tmp_path: Path) -> None:
+    services, fresh, second, _ = await _second_run(tmp_path, {}, {"domains": ("physics",)})
+
+    assert fresh.count("topic_init") == 1
+    assert "different domains" in _notices(services, second.run_id)[0]
+
+
+async def test_prior_run_with_other_framing_is_not_reused(tmp_path: Path) -> None:
+    services, fresh, second, _ = await _second_run(
+        tmp_path,
+        {"constraints": ("Research lead: Research question: does sleep help?",)},
+        {"constraints": ("Research lead: Research question: does caffeine help?",)},
+    )
+
+    assert fresh.count("topic_init") == 1
+    assert "different framing" in _notices(services, second.run_id)[0]
+
+
+async def test_failure_while_adopting_runs_every_stage_with_a_generic_notice(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def broken(prior):
+        raise KeyError("/secret/local/path")
+
+    monkeypatch.setattr(reuse, "_revision_text", broken)
+    services, fresh, second, first = await _second_run(tmp_path, {}, {})
+
+    assert fresh.count("topic_init") == 1
+    assert _notices(services, second.run_id) == [
+        f"Run {first.run_id} was not reused (the prior run's files could not be copied); "
+        "running every stage."
+    ]
+    assert "reused_from" not in services.store.read_run(second.run_id)
+
+
+def _convergence_reviewer(info: object) -> dict:
+    finding = {
+        "hypothesis_id": "H2", "field": "prediction", "severity": "blocking",
+        "category": "baseline", "kind": "fix", "due": "now", "issue": "leaks",
+        "suggestion": None,
+    }  # fmt: skip
+    if not re.search(r'"changed_hypotheses"\s*:\s*\[', info.user):  # type: ignore[attr-defined]
+        return {"findings": [finding]}
+    return {
+        "findings": [{**finding, "issue": "new objection"}],
+        "resolutions": [{"finding_id": "F1-1", "status": "maintained", "reason": "leak stands"}],
+    }
+
+
+async def test_reused_run_reviews_against_the_prior_runs_final_review(tmp_path: Path) -> None:
+    services = _services(tmp_path)
+    services.reviewer = FixtureLLM(overrides={"hypothesis_review": _convergence_reviewer})
+    first = await run_pipeline(request(review_phase=True), services)
+
+    second = await run_pipeline(
+        request(review_phase=True, prior_run_id=first.run_id), services
+    )
+
+    assert second.status is RunStatus.AWAITING_REVIEW, second.error
+    review = services.store.artifacts(second.run_id).read_json(8, "review.json")
+    assert "error" not in review
+    by_issue = {f["issue"]: f for f in review["findings"]}
+    assert by_issue["[unchanged] new objection"]["severity"] == "major"
+    assert by_issue["[maintains F1-1] leak stands"]["severity"] == "blocking"
+    assert [r["finding_id"] for r in review["resolutions"]] == ["F1-1"]

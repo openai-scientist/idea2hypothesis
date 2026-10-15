@@ -667,6 +667,8 @@ def _check_revision_responses(data: dict[str, Any], owed: list[str]) -> Findings
 #: Prefixes the code puts on findings it downgrades, so the researcher and later stages see why.
 LATER_PREFIX = "[for experiment design] "
 UNCHANGED_PREFIX = "[unchanged] "
+#: Run file where ``pipeline.reuse.adopt`` keeps the earlier run's final set and review.
+PREVIOUS_ROUND = "reused_previous_round.json"
 #: Hypothesis fields whose change counts as a revision (derived fields such as caveats do not).
 CONTENT_FIELDS = (
     "statement", "gap_id", "evidence_refs", "exposure", "outcome", "estimand", "method",
@@ -691,21 +693,33 @@ def _previous_round(
     ctx: StageContext, hypotheses: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], set[str]] | None:
     """The previous round's findings (with their wire ids) and the hypotheses the revision
-    changed; ``None`` in the first round (no archived set from a Platform comment)."""
+    changed; ``None`` in the first round of a run that reuses no earlier run."""
     if ctx.attempt < 2:
-        return None
+        # A reused run's first round follows the earlier run's final review (see ``reuse.adopt``).
+        reused = ctx.artifacts.read_run_json(PREVIOUS_ROUND)
+        if not isinstance(reused, dict) or not isinstance(reused.get("review"), dict):
+            return None
+        return _round_view(reused["review"], 1, reused.get("hypotheses"), hypotheses)
     archived = ctx.artifacts.read_archived_json(ctx.attempt - 1, STAGE, "hypotheses.json")
-    if not isinstance(archived, dict) or not isinstance(archived.get("hypotheses"), list):
+    if not isinstance(archived, dict):
         return None
     review = ctx.artifacts.read_archived_json(ctx.attempt - 1, STAGE, "review.json")
+    return _round_view(review, ctx.attempt - 1, archived.get("hypotheses"), hypotheses)
+
+
+def _round_view(
+    review: Any, default_round: int, before: Any, hypotheses: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], set[str]] | None:
+    if not isinstance(before, list):
+        return None
     findings: list[dict[str, Any]] = []
     if isinstance(review, dict):
-        round_ = review.get("round", ctx.attempt - 1)
+        round_ = review.get("round", default_round)
         findings = [
             {"id": f"F{round_}-{n}", **{k: f.get(k) for k in FINDING_FIELDS}}
             for n, f in enumerate(review.get("findings") or [], 1)
         ]
-    return findings, changed_hypotheses(archived["hypotheses"], hypotheses)
+    return findings, changed_hypotheses(before, hypotheses)
 
 
 def _check_review(
@@ -727,7 +741,8 @@ def _check_review(
         f.require(item.get("category") in FINDING_CATEGORIES, f"finding {n}: bad category")
         f.require(item.get("kind") in FINDING_KINDS, f"finding {n}: bad kind")
         f.require(
-            item.get("due") in FINDING_DUE, f"finding {n}: 'due' must be one of {list(FINDING_DUE)}"
+            item.get("due", "now") in FINDING_DUE,
+            f"finding {n}: 'due' must be one of {list(FINDING_DUE)}",
         )
     if owed:
         f.extend(_check_resolutions(data, owed, ids))
@@ -841,7 +856,8 @@ async def review(ctx: StageContext) -> dict[str, Any]:
         )  # fmt: skip
         for item in data["findings"]:
             finding = {k: item.get(k) for k in FINDING_FIELDS}
-            if item["due"] == "later":
+            # Evidence a hypothesis lacks cannot wait for experiment design.
+            if item.get("due", "now") == "later" and finding["kind"] != "needs_evidence":
                 finding["severity"] = "minor"
                 finding["issue"] = LATER_PREFIX + str(finding["issue"])
             _keep_unchanged(finding, unchanged)
@@ -865,7 +881,6 @@ async def review(ctx: StageContext) -> dict[str, Any]:
                 "category": "evidence", "kind": "needs_evidence", "issue": standing,
                 "suggestion": None,
             }  # fmt: skip
-            _keep_unchanged(finding, unchanged)
             result["findings"].append(finding)
     result["passed"] = "error" not in result and not any(
         f["severity"] == "blocking" for f in result["findings"]

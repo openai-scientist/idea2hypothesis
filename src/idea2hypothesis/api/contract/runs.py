@@ -225,11 +225,12 @@ class ContractRuns:
 
     def _services_for_request(self, req: RunCreateRequest, domains: list[str]) -> Services:
         services = services_for_request(self.base_services(), req.models, self.llm_factory)
-        # The run's domain picks its hypothesis roles: the request's domains, then the profile's.
+        # The request's domains, then the profile's, pick only the hypothesis roles; stage
+        # prompt overrides stay with the configured domain.
         config = services.config.prompts
-        domain = run_domain([*domains, req.profile.domain or ""], config.domain)
-        if domain != services.prompts.domain:
-            prompts = PromptLoader(domain, config.override_file or None)
+        roles = run_domain([*domains, req.profile.domain or ""], config.domain)
+        if roles != services.prompts.roles_domain:
+            prompts = PromptLoader(config.domain, config.override_file or None, roles)
             services = dataclasses.replace(services, prompts=prompts)
         if self.service._injected is None:  # noqa: SLF001
             # Literature keys come from the request, never from the environment.
