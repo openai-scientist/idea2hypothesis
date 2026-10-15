@@ -423,8 +423,15 @@ def drop_redundant_not_used(data: Any, candidates: dict[str, Candidate]) -> None
         if isinstance(x, str)
     }
     accounted = used | {c.id for c in candidates.values() if c.fatal}
+    # A malformed entry (e.g. a list of ids) stays for check_merge to report.
     data["not_used"] = [
-        e for e in raw if not (isinstance(e, dict) and e.get("candidate") in accounted)
+        e
+        for e in raw
+        if not (
+            isinstance(e, dict)
+            and isinstance(e.get("candidate"), str)
+            and e["candidate"] in accounted
+        )
     ]
 
 

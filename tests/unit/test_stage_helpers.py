@@ -663,6 +663,9 @@ def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why(
     unknown = {"hypotheses": [one, *rest], "not_used": [{**dup, "candidate": "ghost-1"}]}
     drop_redundant_not_used(unknown, candidates)
     assert "is used by the set" in " | ".join(check_merge(unknown, candidates, 2, 6).errors)
+    malformed = {"hypotheses": [one, *rest], "not_used": [{**dup, "candidate": ["innovator-2"]}]}
+    drop_redundant_not_used(malformed, candidates)  # no TypeError: the check reports it
+    assert malformed["not_used"] == [{**dup, "candidate": ["innovator-2"]}]
     assert "say why in text" in errors([one, rest[0]], [{**dup, "text": ""}])
     # a duplicate repeats the claim of the hypothesis it names
     sign_clash = errors([one, rest[0]], [{**dup, "of": "H2"}])
