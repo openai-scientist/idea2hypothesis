@@ -677,6 +677,7 @@ def _rejection_feedback(
     spec: gates.GateSpec, art: Any, note: str, review_round: int | None = None
 ) -> str:
     lines = ["Reviewer feedback on the previous attempt (address it in this attempt):"]
+    findings: list[dict[str, Any]] = []
     if note.strip():
         lines.append(f"- {note.strip()}")
     if spec.kind == gates.HYPOTHESES and review_round is not None:
@@ -695,7 +696,9 @@ def _rejection_feedback(
         try:
             doc = art.read_json(8, "hypotheses.json")
             previous = "; ".join(f"{h['id']}: {h['statement']}" for h in doc["hypotheses"])
-            if review_round is not None:
+            if review_round is not None and not findings:
+                lines.append(f"- Previous hypotheses: {previous}")
+            elif review_round is not None:
                 lines.append(
                     "- Keep every hypothesis that no finding above concerns unchanged (same id, "
                     "same statement); change only what the findings require. Previous "

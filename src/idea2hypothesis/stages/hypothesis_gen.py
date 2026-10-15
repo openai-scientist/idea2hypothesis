@@ -199,7 +199,8 @@ def _evidence_view(card: dict[str, Any]) -> dict[str, Any]:
 #: Why a candidate with no fatal objection standing is left out of the final set.
 NOT_USED_REASONS = ("duplicate", "over_limit", "lead_direction")
 #: Run-constraint prefixes that carry the research lead's direction to this stage.
-LEAD_DIRECTION_PREFIXES = ("Research lead: ", "Feedback from a later stage: ")
+#: The lead's framing lines ("Research lead: Research question: ...") are not direction.
+LEAD_DIRECTION_PREFIXES = ("Research lead: Handoff:", "Feedback from a later stage: ")
 
 
 def _merge_problems(
@@ -279,8 +280,9 @@ def _not_used_problems(
             problems.append(f"{tag}: the set has {len(items)} of at most {maximum} hypotheses; "
                             f"there is room for {c}")  # fmt: skip
         elif reason == "lead_direction" and not lead_directed:
-            problems.append(f"{tag}: this run has no research-lead direction (no 'Research lead:' "
-                            f"or 'Feedback from a later stage:' constraint, no review comments); "
+            problems.append(f"{tag}: this run has no research-lead direction (no "
+                            f"'Research lead: Handoff:' or 'Feedback from a later stage:' "
+                            f"constraint, no review comments); "
                             f"use {c} or give duplicate or over_limit")  # fmt: skip
         if not _text(entry.get("text")):
             problems.append(f"{tag}: say why in text")

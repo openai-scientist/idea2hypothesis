@@ -630,6 +630,20 @@ def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why(
     assert not errors([one, rest[0]], [lead], lead_directed=True)
     assert "no research-lead direction" in errors([one, rest[0]], [lead])
     assert "say why in text" in errors([one, rest[0]], [{**lead, "text": ""}], lead_directed=True)
+    # only a handoff or send-back feedback is direction; the lead's framing lines are not
+    from idea2hypothesis.stages.hypothesis_gen import LEAD_DIRECTION_PREFIXES
+
+    def directed(constraint: str) -> bool:
+        return constraint.startswith(LEAD_DIRECTION_PREFIXES)
+
+    assert directed("Research lead: Handoff: drop the observational designs")
+    assert directed("Feedback from a later stage: add a falsifier")
+    framing = "Research lead: Research question: does sleep raise scores?"
+    assert not directed(framing)
+    assert not directed("Research lead: Objective: map the evidence")
+    assert "no research-lead direction" in errors(
+        [one, rest[0]], [lead], lead_directed=directed(framing)
+    )
     assert "is used by the set" in errors([one, *rest], [{**dup, "candidate": "pragmatist-1"}])
     assert "say why in text" in errors([one, rest[0]], [{**dup, "text": ""}])
     # a duplicate repeats the claim of the hypothesis it names
@@ -879,6 +893,21 @@ def test_a_review_revision_keeps_the_hypotheses_no_finding_concerns():
     assert "finding f1 at H2" in text
     assert "no finding above concerns unchanged (same id, same statement)" in text
     assert "H1: A raises B" in text
+    assert "write a better set" not in text
+
+
+def test_a_review_round_without_findings_has_no_keep_instruction():
+    from idea2hypothesis.pipeline import gates
+    from idea2hypothesis.pipeline.runner import _rejection_feedback
+
+    class NoFindings(_FeedbackArtifacts):
+        def read_run_json(self, name: str):
+            return []
+
+    spec = gates.gate_by_kind(gates.HYPOTHESES)
+    text = _rejection_feedback(spec, NoFindings(), "", review_round=1)
+    assert "- Previous hypotheses: H1: A raises B" in text
+    assert "unchanged" not in text
     assert "write a better set" not in text
 
 

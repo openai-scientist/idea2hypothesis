@@ -7,11 +7,12 @@ from typing import Any
 from idea2hypothesis.pipeline.contracts import check_problem_tree, check_topic_evaluation
 from idea2hypothesis.pipeline.models import StageContext
 from idea2hypothesis.stages.base import StageFailure, compact_json, request_json
-from idea2hypothesis.stages.hypothesis_gen import LEAD_DIRECTION_PREFIXES
 from idea2hypothesis.stages.topic_init import goal_for_prompt
 from idea2hypothesis.storage.runs import utc_now
 
 STAGE = 2
+#: Any research-lead line waives the topic threshold: the lead owns the framing.
+LEAD_FRAMING_PREFIXES = ("Research lead: ", "Feedback from a later stage: ")
 
 
 def render_tree_markdown(tree: dict[str, Any]) -> str:
@@ -80,7 +81,7 @@ async def run(ctx: StageContext) -> list[str]:
 
     below = overall < ctx.config.research.min_topic_score
     # The research lead has already fixed the framing: a low prior score does not stop the run.
-    waived = below and any(c.startswith(LEAD_DIRECTION_PREFIXES) for c in ctx.constraints)
+    waived = below and any(c.startswith(LEAD_FRAMING_PREFIXES) for c in ctx.constraints)
     if waived:
         evaluation["threshold_waived"] = {
             "reason": "the run has research-lead direction",
