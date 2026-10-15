@@ -23,6 +23,7 @@ import httpx
 
 from idea2hypothesis.api.platform_events import PlatformEventLog
 from idea2hypothesis.config import ApiConfig
+from idea2hypothesis.storage import filecache
 from idea2hypothesis.storage.artifacts import write_json_atomic
 from idea2hypothesis.storage.runs import RunStore, utc_now
 
@@ -103,7 +104,7 @@ class DeliveryManager:
 
     def read_meta(self, run_id: str) -> dict[str, Any] | None:
         try:
-            return json.loads(self._meta_path(run_id).read_text(encoding="utf-8"))
+            return json.loads(filecache.read_text(self._meta_path(run_id)))
         except (OSError, ValueError):
             return None
 
@@ -112,7 +113,7 @@ class DeliveryManager:
 
     def read_delivery(self, run_id: str) -> dict[str, Any]:
         try:
-            data = json.loads(self._delivery_path(run_id).read_text(encoding="utf-8"))
+            data = json.loads(filecache.read_text(self._delivery_path(run_id)))
         except (OSError, ValueError):
             data = {}
         data.setdefault("delivered_source_seq", 0)
