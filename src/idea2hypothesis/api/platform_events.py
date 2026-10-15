@@ -2105,6 +2105,10 @@ def _on_stage_progress(view: RunView, event: Event) -> list[Envelope]:
     stage_run, try_index = int(data.get("stage_run", 0)), int(data.get("try", 0))
     if kind == "restart":
         return _on_restart(view, group, stage, stage_run, try_index)
+    if kind == "notice":  # a line the engine says about the run itself (for example, reuse)
+        message_id = f"notice-{event.seq}"
+        return [_message(message_id, str(data["text"]), stage_key=group.key,
+                         actor=group.cast[0], done=True)]  # fmt: skip
     step = _PROGRESS_STEP.get(kind)
     if step is None:
         return []

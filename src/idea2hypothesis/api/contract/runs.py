@@ -185,6 +185,7 @@ class ContractRuns:
                 platform_run_id=req.stage_run_id,
                 budget_usd=float(req.budget_usd),
                 review_phase=True,
+                prior_run_id=req.inputs.prior_engine_run_id,
             )
             await self.service._start(run_pipeline(request, services), run_id)  # noqa: SLF001
         return await self.state(run_id), True
