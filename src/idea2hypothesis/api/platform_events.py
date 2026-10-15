@@ -17,7 +17,6 @@ it ends, what it produced; their numbers and names come from the same records.
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
@@ -33,7 +32,7 @@ from idea2hypothesis.pipeline.contracts import normalise_margin
 from idea2hypothesis.pipeline.events import Event
 from idea2hypothesis.pipeline.models import Stage
 from idea2hypothesis.storage.artifacts import ArtifactStore, write_bytes_atomic
-from idea2hypothesis.storage.runs import JsonlCache, RunStore
+from idea2hypothesis.storage.runs import RunStore
 
 logger = logging.getLogger(__name__)
 
@@ -2568,13 +2567,24 @@ class PlatformEventLog:
     def __init__(self, store: RunStore) -> None:
         self.store = store
         self._state: dict[str, _LogState] = {}
-        self._rows: JsonlCache[dict[str, Any]] = JsonlCache(json.loads, stop_on_error=True)
 
     def path(self, run_id: str) -> Path:
         return self.store.run_dir(run_id) / PLATFORM_FILE
 
     def _load(self, run_id: str) -> list[dict[str, Any]]:
-        return self._rows.read(self.path(run_id))
+        rows: list[dict[str, Any]] = []
+        try:
+            lines = self.path(run_id).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return rows
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                break  # torn tail after a crash
+        return rows
 
     def _heal(self, run_id: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Drop a trailing core-event batch that was only partly written."""
@@ -2590,7 +2600,6 @@ class PlatformEventLog:
         kept = rows if complete else [r for r in rows if r.get("_core_seq") != core]
         body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept)
         write_bytes_atomic(self.path(run_id), body.encode("utf-8"))
-        self._rows.drop(self.path(run_id))
         return kept
 
     def _file_ends_cleanly(self, run_id: str) -> bool:
@@ -2651,9 +2660,7 @@ class PlatformEventLog:
         """Public envelopes with ``source_seq > after`` in order."""
         with self.store.lock(run_id):
             self.state(run_id)  # heals a torn tail before reading
-            rows = [
-                copy.deepcopy(public(r)) for r in self._load(run_id) if int(r["source_seq"]) > after
-            ]
+            rows = [public(r) for r in self._load(run_id) if int(r["source_seq"]) > after]
         return rows[:limit] if limit is not None else rows
 
 
