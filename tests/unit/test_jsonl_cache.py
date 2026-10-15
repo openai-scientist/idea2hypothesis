@@ -76,6 +76,24 @@ def test_stop_on_error_ends_parsing_for_good(tmp_path: Path) -> None:
     assert cache.read(path) == [{"a": 1}]
 
 
+def test_stop_on_error_torn_tail_is_retried_when_completed(tmp_path: Path) -> None:
+    path = tmp_path / "log.jsonl"
+    cache = JsonlCache(json.loads, stop_on_error=True)
+    path.write_bytes(b'{"a": 1}\n{"a"')
+    assert cache.read(path) == [{"a": 1}]
+    with path.open("ab") as fh:
+        fh.write(b': 2}\n{"a": 3}\n')
+    assert cache.read(path) == [{"a": 1}, {"a": 2}, {"a": 3}]
+
+
+def test_run_store_read_events_returns_copies(tmp_path: Path) -> None:
+    store = RunStore(tmp_path)
+    (tmp_path / "r1").mkdir()
+    store.append_event("r1", "t", data={"k": [1]})
+    store.read_events("r1")[0].data["k"].append(2)
+    assert store.read_events("r1")[0].data == {"k": [1]}
+
+
 def test_skip_mode_skips_bad_lines(tmp_path: Path) -> None:
     path = tmp_path / "log.jsonl"
     path.write_bytes(b'{"a": 1}\nnot json\n\n{"a": 3}\n')

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha1
 from pathlib import Path
@@ -104,12 +105,14 @@ class JsonlCache(Generic[_T]):
                         rest = data[cut:].decode("utf-8")
                     except UnicodeDecodeError:
                         rest = ""
-                    entry.partial = self._parse_lines(entry, rest.splitlines())
+                    entry.partial = self._parse_lines(entry, rest.splitlines(), final=False)
             entry.offset += cut
             self._entries[path] = entry
             return entry.records + entry.partial
 
-    def _parse_lines(self, entry: _Tail[_T], lines: list[str]) -> list[_T]:
+    def _parse_lines(self, entry: _Tail[_T], lines: list[str], *, final: bool = True) -> list[_T]:
+        # ``final=False`` is an unterminated tail: a bad line there may just be torn, so it
+        # must not end parsing for good.
         out: list[_T] = []
         for line in lines:
             if not line.strip():
@@ -118,7 +121,7 @@ class JsonlCache(Generic[_T]):
                 out.append(self._parse(line))
             except (ValueError, KeyError):
                 if self._stop_on_error:
-                    entry.stopped = True
+                    entry.stopped = entry.stopped or final
                     break
         return out
 
@@ -277,7 +280,8 @@ class RunStore:
 
     def read_events(self, run_id: str, after_seq: int = 0, limit: int | None = None) -> list[Event]:
         events = [e for e in self._scan_events(run_id) if e.seq > after_seq]
-        return events[:limit] if limit is not None else events
+        events = events[:limit] if limit is not None else events
+        return [replace(e, data=copy.deepcopy(e.data)) for e in events]
 
     # -- platform index ---------------------------------------------------
 
