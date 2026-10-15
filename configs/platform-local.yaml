@@ -47,7 +47,7 @@ literature:
   cache: true
 
 prompts:
-  domain: ml                     # ml (general default) | biology (metabolic modelling: FBA) | hep
+  domain: ml                     # ml (general default) | biology (metabolic modelling: FBA) | hep | se (empirical software engineering)
 
 runtime:
   max_retries: 2                 # stage-level retries after the LLM retries are exhausted

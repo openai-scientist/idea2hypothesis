@@ -333,7 +333,8 @@ async def create_run(request: RunRequest, services: Services) -> str:
         text = (
             f"Reused stages 1-7 of run {request.prior_run_id}; revising its hypotheses."
             if reuse_problem is None
-            else f"Run {request.prior_run_id} was not reused ({reuse_problem}); running every stage."
+            else f"Run {request.prior_run_id} was not reused ({reuse_problem}); "
+            "running every stage."
         )
         await _emit(
             services, run_id, ev.STAGE_PROGRESS, stage=int(Stage.HYPOTHESIS_GEN),

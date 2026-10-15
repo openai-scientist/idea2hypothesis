@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -17,7 +18,10 @@ from typing import Any
 
 import yaml
 
-DOMAINS = ("ml", "hep", "biology")
+DOMAINS = ("ml", "hep", "biology", "se")
+#: Domains that also override stage prompts (``prompts/domains/<name>.yaml``); the others of
+#: ``DOMAINS`` change only the hypothesis roles.
+OVERRIDE_DOMAINS = ("hep", "biology")
 _ENTRY_FIELDS = {"system", "user", "json_mode", "max_tokens", "temperature", "guidance"}
 _VAR_RE = re.compile(r"\{\{(\w+)\}\}")
 _INCLUDE_RE = re.compile(r"\{\{>\s*(\w+)\s*\}\}")
@@ -68,6 +72,11 @@ def _validate_entry(key: str, entry: Any, origin: str) -> dict[str, Any]:
     return dict(entry)
 
 
+def run_domain(names: Sequence[str], default: str) -> str:
+    """The first of ``names`` that has a role set (ignoring case), else ``default``."""
+    return next((n for n in (x.strip().lower() for x in names) if n in DOMAINS), default)
+
+
 class PromptLoader:
     """Resolves prompts for one domain, with optional user override file."""
 
@@ -95,7 +104,7 @@ class PromptLoader:
             for name, entry in roles.items()
         }
 
-        if domain != "ml":
+        if domain in OVERRIDE_DOMAINS:
             self._apply(_read_package_yaml("domains", f"{domain}.yaml"), f"domains/{domain}.yaml")
         if override_file:
             self._apply(self._read_override(Path(override_file)), str(override_file))

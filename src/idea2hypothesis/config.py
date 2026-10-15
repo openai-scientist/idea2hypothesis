@@ -20,7 +20,7 @@ import yaml
 
 REVIEW_MODES = ("auto", "light", "copilot", "full")
 LLM_PROVIDERS = ("openai_compatible", "bedrock")
-PROMPT_DOMAINS = ("ml", "hep", "biology")
+PROMPT_DOMAINS = ("ml", "hep", "biology", "se")
 LITERATURE_SOURCES = ("openalex", "semantic_scholar", "arxiv")
 
 

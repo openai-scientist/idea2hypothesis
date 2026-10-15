@@ -41,6 +41,7 @@ from idea2hypothesis.pipeline.runner import (
     run_pipeline,
 )
 from idea2hypothesis.pipeline.services import build_services
+from idea2hypothesis.prompts.loader import PromptLoader, run_domain
 from idea2hypothesis.storage.runs import RunNotFoundError, utc_now
 
 if TYPE_CHECKING:
@@ -153,7 +154,7 @@ class ContractRuns:
             if existing:
                 return await self.state(existing), False
             try:
-                services = self._services_for_request(req)
+                services = self._services_for_request(req, domains)
             except LLMConfigError as exc:
                 raise _invalid(str(exc)) from exc
             run_id = self.store.claim_platform_id(req.stage_run_id, new_run_id())
@@ -222,8 +223,14 @@ class ContractRuns:
         ]
         return topic.strip(), [d.strip() for d in domains if d.strip()], notes
 
-    def _services_for_request(self, req: RunCreateRequest) -> Services:
+    def _services_for_request(self, req: RunCreateRequest, domains: list[str]) -> Services:
         services = services_for_request(self.base_services(), req.models, self.llm_factory)
+        # The run's domain picks its hypothesis roles: the request's domains, then the profile's.
+        config = services.config.prompts
+        domain = run_domain([*domains, req.profile.domain or ""], config.domain)
+        if domain != services.prompts.domain:
+            prompts = PromptLoader(domain, config.override_file or None)
+            services = dataclasses.replace(services, prompts=prompts)
         if self.service._injected is None:  # noqa: SLF001
             # Literature keys come from the request, never from the environment.
             keys = {name: value.get_secret_value() for name, value in req.integrations.items()}

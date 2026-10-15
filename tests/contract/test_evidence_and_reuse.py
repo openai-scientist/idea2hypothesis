@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 
+from tests.conftest import TOPIC
 from tests.contract.fake_platform import validate
 from tests.fixtures.contract_harness import contract_harness, run_body
-from tests.conftest import TOPIC
 
 STAGE = "stage-run-1"
 APPROVE = {"action": "approve", "actor": "user"}
@@ -105,3 +105,39 @@ async def test_missing_prior_engine_run_runs_in_full_and_says_why(tmp_path):
         assert keys.count("topic_init") == 1
         notes = [e for e in h.platform.events[STAGE] if e["type"] == "i2h.agent.message"]
         assert any("was not reused" in e["summary"] for e in notes)
+
+
+async def _perspective_systems(tmp_path, *, domains, profile=None) -> set[str]:
+    systems: set[str] = set()
+
+    def record(info) -> None:
+        if info.key == "perspective":
+            systems.add(info.system)
+
+    async with contract_harness(tmp_path, on_call=record) as h:
+        body = run_body(STAGE)
+        body["inputs"] = {"params": {"topic": TOPIC, "domains": domains}}
+        if profile:
+            body["profile"] = {"domain": profile}
+        created = await h.client.post("/v1/runs", json=body)
+        await h.settle()
+        assert created.status_code == 201, created.text
+    return systems
+
+
+async def test_run_domain_selects_the_hypothesis_roles(tmp_path):
+    systems = await _perspective_systems(tmp_path, domains=["education", "se"])
+
+    assert systems and all("software engineering" in s for s in systems)
+
+
+async def test_profile_domain_selects_roles_when_the_params_name_none(tmp_path):
+    systems = await _perspective_systems(tmp_path, domains=["education"], profile="se")
+
+    assert systems and all("software engineering" in s for s in systems)
+
+
+async def test_unknown_domains_keep_the_default_roles(tmp_path):
+    systems = await _perspective_systems(tmp_path, domains=["education", "psychology"])
+
+    assert systems and not any("software engineering" in s for s in systems)
