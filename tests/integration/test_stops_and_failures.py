@@ -50,6 +50,18 @@ async def test_rejecting_every_paper_stops_at_stage_5(tmp_path: Path) -> None:
     assert all(d["reason"] for d in review["decisions"])
 
 
+async def test_an_empty_shortlist_names_the_sources_that_were_down(tmp_path: Path) -> None:
+    # Live: OpenAlex was rate limited for hours; the off-topic rest was all rejected.
+    llm = FixtureLLM(keep_title=lambda title: False)
+    literature = FixtureLiterature(source_errors={"arxiv": "HTTP 429 (rate limited)"})
+    services = make_services(tmp_path, llm=llm, literature=literature, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+
+    assert result.status is RunStatus.FAILED
+    assert result.error is not None and result.error.code == "SOURCES_UNAVAILABLE"
+    assert "arxiv (HTTP 429 (rate limited))" in result.error.message
+
+
 async def test_non_researchable_topic_stops_at_stage_1(tmp_path: Path) -> None:
     llm = FixtureLLM(
         overrides={

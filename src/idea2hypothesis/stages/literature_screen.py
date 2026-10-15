@@ -50,9 +50,7 @@ def has_abstract(row: dict[str, Any]) -> bool:
 def keyword_overlap(blob: str, keywords: list[str]) -> int:
     """How many keywords occur in ``blob`` as whole words, plural allowed ("ml" does not match
     "html"; "benchmark" matches "benchmarks")."""
-    return sum(
-        1 for kw in keywords if re.search(rf"(?<!\w){re.escape(kw)}(?:s|es)?(?!\w)", blob)
-    )
+    return sum(1 for kw in keywords if re.search(rf"(?<!\w){re.escape(kw)}(?:s|es)?(?!\w)", blob))
 
 
 def prefilter(
@@ -389,6 +387,15 @@ async def run(ctx: StageContext) -> list[str]:
         },
     )
     if not shortlist:
+        if down := _sources_down(ctx):
+            # Live: OpenAlex hit its daily limit and only off-topic arXiv papers came back. A new
+            # search strategy cannot help; the source has to come back.
+            raise StageFailure(
+                "SOURCES_UNAVAILABLE",
+                f"screening kept 0 of {len(candidates)} papers, and these sources returned "
+                f"nothing: {'; '.join(down)}. Retry when they are back; changing the search "
+                "strategy will not help",
+            )
         raise StageFailure(
             "EMPTY_SHORTLIST",
             f"screening kept 0 of {len(candidates)} papers; refine the search strategy",
@@ -398,3 +405,16 @@ async def run(ctx: StageContext) -> list[str]:
             f"{counts['unscored']} papers were not scored by the reviewer and were excluded"
         )
     return warnings
+
+
+def _sources_down(ctx: StageContext) -> list[str]:
+    """Sources of the collected literature that failed every search, with their first error."""
+    try:
+        per_source = ctx.artifacts.read_json(STAGE - 1, "search_meta.json").get("per_source") or {}
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [
+        f"{name} ({stats['errors'][0]})"
+        for name, stats in sorted(per_source.items())
+        if isinstance(stats, dict) and not stats.get("papers") and stats.get("errors")
+    ]
