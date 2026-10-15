@@ -9,6 +9,7 @@ from pathlib import Path
 from idea2hypothesis.pipeline import reuse
 from idea2hypothesis.pipeline.models import GateAnswer, RunStatus
 from idea2hypothesis.pipeline.runner import answer_gate, run_pipeline
+from idea2hypothesis.stages import hypothesis_gen
 from tests.conftest import make_config, make_services, request
 from tests.fixtures import FixtureLLM
 
@@ -230,3 +231,73 @@ async def test_reused_run_reviews_against_the_prior_runs_final_review(tmp_path: 
     assert by_issue["[unchanged] new objection"]["severity"] == "major"
     assert by_issue["[maintains P1-1] leak stands"]["severity"] == "blocking"
     assert [r["finding_id"] for r in review["resolutions"]] == ["P1-1"]
+
+
+def _edited(statements: dict[str, str]):
+    """A hypothesis_gen answer: the fixture's set with the given statements replaced."""
+
+    def answer(info):
+        data = FixtureLLM()._default_hypothesis_gen(info)
+        for h in data["hypotheses"]:
+            h["statement"] = statements.get(h["id"], h["statement"])
+        return data
+
+    return answer
+
+
+async def _revise(tmp_path: Path, handoff: str, answers: list):
+    services = _services(tmp_path)
+    first = await run_pipeline(request(review_phase=True), services)
+    old = services.store.artifacts(first.run_id).read_json(8, "hypotheses.json")["hypotheses"]
+    services.llm = services.reviewer = fresh = FixtureLLM(overrides={"hypothesis_gen": answers})
+    second = await run_pipeline(
+        request(
+            review_phase=True,
+            prior_run_id=first.run_id,
+            constraints=(f"Research lead: Handoff: {handoff}",),
+        ),
+        services,
+    )
+    assert second.status is RunStatus.AWAITING_REVIEW, second.error
+    new = services.store.artifacts(second.run_id).read_json(8, "hypotheses.json")["hypotheses"]
+    return fresh, old, new
+
+
+async def test_revision_that_renumbers_is_retried_until_ids_keep_their_claims(
+    tmp_path: Path,
+) -> None:
+    renumbered = _edited({"H2": "A claim that was H3 before."})
+    fresh, old, new = await _revise(
+        tmp_path, "Make H1's prediction a number", [renumbered, _edited({})]
+    )
+
+    assert fresh.count("hypothesis_gen") == 2
+    assert {h["id"]: h["statement"] for h in new} == {h["id"]: h["statement"] for h in old}
+
+
+async def test_named_hypothesis_may_change_its_statement(tmp_path: Path) -> None:
+    fresh, old, new = await _revise(
+        tmp_path, "Make H1's prediction a number", [_edited({"H1": "H1 with a number."})]
+    )
+
+    assert fresh.count("hypothesis_gen") == 1
+    assert [h["id"] for h in new] == [h["id"] for h in old]
+    assert new[0]["statement"] == "H1 with a number."
+    assert [h["statement"] for h in new[1:]] == [h["statement"] for h in old[1:]]
+
+
+def test_new_hypothesis_with_a_previous_id_is_rejected_by_name() -> None:
+    prior = {"H1": "Sleep helps", "H2": "Caffeine hurts"}
+    reused_id = {"hypotheses": [
+        {"id": "H1", "statement": "Sleep  helps"},
+        {"id": "H2", "statement": "A different claim."},
+    ]}  # fmt: skip
+
+    errors = hypothesis_gen._check_ids_bound(reused_id, prior, named=set()).errors
+    assert len(errors) == 1 and "H2" in errors[0] and "id that no previous" in errors[0]
+
+    dropped = {"hypotheses": [{"id": "H1", "statement": "Sleep helps."}]}
+    errors = hypothesis_gen._check_ids_bound(dropped, prior, named=set()).errors
+    assert len(errors) == 1 and "H2 is missing" in errors[0]
+
+    assert hypothesis_gen._check_ids_bound(reused_id, prior, named={"H2"}).ok

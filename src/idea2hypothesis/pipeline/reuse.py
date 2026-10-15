@@ -138,7 +138,7 @@ def adopt(store: RunStore, prior_id: str, run_id: str, *, mode: str, review_phas
                     "attempt": 1, "status": "approved", "opened_at": now, "resolved_at": now,
                     "answer": None, "carried_from": prior_id,
                 }  # fmt: skip
-        if prior is not None and isinstance(review, dict):
+        if prior is not None:
             target.write_run_json(
                 PREVIOUS_ROUND, {"hypotheses": prior["hypotheses"], "review": review}
             )

@@ -551,6 +551,9 @@ async def run(ctx: StageContext) -> list[str]:
         c.startswith(LEAD_DIRECTION_PREFIXES) for c in ctx.constraints
     )
 
+    prior = _prior_statements(ctx)
+    named = _named_ids(ctx, prior)
+
     def validate(data: dict[str, Any]) -> Findings:
         normalise_hypotheses(data)
         f = check_hypotheses(data, valid_gaps, valid_refs, valid_tensions)
@@ -561,6 +564,8 @@ async def run(ctx: StageContext) -> list[str]:
         )
         if owed:
             f.extend(_check_revision_responses(data, owed))
+        if prior:
+            f.extend(_check_ids_bound(data, prior, named))
         return f
 
     await ctx.progress("merge", perspectives=sorted(debate.positions))
@@ -644,6 +649,61 @@ async def run(ctx: StageContext) -> list[str]:
                 f"with the run's own papers ({why})"
             )
     return [*warnings, *soft]
+
+
+#: Said in the feedback of every attempt that revises a previous set (``pipeline.reuse``, the
+#: rejection feedback of the runner); the previous set is then bound to its ids.
+_KEEP_MARK = "same id, same statement"
+
+
+def _prior_statements(ctx: StageContext) -> dict[str, str]:
+    """Id -> statement of the set this attempt revises; empty when it revises none."""
+    if _KEEP_MARK not in ctx.feedback:
+        return {}
+    if ctx.attempt < 2:
+        doc = ctx.artifacts.read_run_json(PREVIOUS_ROUND)
+    else:
+        doc = ctx.artifacts.read_archived_json(ctx.attempt - 1, STAGE, "hypotheses.json")
+    items = doc.get("hypotheses") if isinstance(doc, dict) else None
+    if not isinstance(items, list):
+        return {}
+    return {
+        str(h["id"]): _plain(h.get("statement")) for h in items if isinstance(h, dict) and "id" in h
+    }
+
+
+def _plain(text: Any) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip().removesuffix(".").strip()
+
+
+def _named_ids(ctx: StageContext, prior: dict[str, str]) -> set[str]:
+    """Prior ids the research lead's lines of this attempt name as a whole token."""
+    lines = [
+        c for c in ctx.constraints if c.startswith(LEAD_DIRECTION_PREFIXES)
+    ] + ctx.feedback.splitlines()
+    # The "Previous hypotheses: ..." list lists every id; it names none.
+    text = "\n".join(re.sub(r"Previous hypotheses.*", "", line) for line in lines)
+    return {i for i in prior if re.search(rf"\b{re.escape(i)}\b", text)}
+
+
+def _check_ids_bound(data: dict[str, Any], prior: dict[str, str], named: set[str]) -> Findings:
+    """A revision keeps each previous id bound to its claim (the Platform selects by id)."""
+    f = Findings()
+    new = {
+        str(h["id"]): _plain(h.get("statement"))
+        for h in data.get("hypotheses") or []
+        if isinstance(h, dict) and "id" in h
+    }
+    for pid, statement in prior.items():
+        if pid not in new:
+            f.error(f"hypothesis {pid} is missing: a revision keeps every previous id")
+        elif pid not in named and new[pid] != statement:
+            f.error(
+                f"hypothesis {pid} has a different statement: a hypothesis the research lead's "
+                f"lines do not name keeps its id and its exact statement ({statement!r}); give a "
+                "new hypothesis an id that no previous hypothesis used"
+            )
+    return f
 
 
 def _check_revision_responses(data: dict[str, Any], owed: list[str]) -> Findings:

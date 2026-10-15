@@ -497,6 +497,7 @@ stages:
       {{> json_rules}}
       Return {"hypotheses": [ {... every schema field ..., "from": ["innovator-1", "pragmatist-2"], "merge_note": "innovator-1 gives ...; pragmatist-2 gives ..."} ], "not_used": [{"candidate": "contrarian-3", "reason": "duplicate", "of": "H2", "text": "..."}], "disagreements": ["unresolved disagreement between perspectives", ...]}
       Only when the feedback above lists reviewer findings (lines starting "- finding"), also return "revision_responses": [{"finding_id": "...", "outcome": "fixed|rebutted|not_fixed", "note": "..."}] with one entry for each finding.
+      When the feedback above lists previous hypotheses, a hypothesis that the research lead's lines or the findings do not name keeps its id and its exact statement; a hypothesis they name keeps its id (its statement may change); every new hypothesis gets an id that no previous hypothesis used.
 
   argument_map:
     json_mode: true
