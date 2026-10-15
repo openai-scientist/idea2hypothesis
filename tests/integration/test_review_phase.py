@@ -8,7 +8,7 @@ from pathlib import Path
 
 from idea2hypothesis.pipeline.models import GateAnswer, RunStatus
 from idea2hypothesis.pipeline.runner import answer_gate, run_pipeline
-from idea2hypothesis.stages.hypothesis_gen import changed_hypotheses
+from idea2hypothesis.stages.hypothesis_gen import _check_resolutions, changed_hypotheses
 from tests.conftest import make_config, make_services, request
 from tests.fixtures import FixtureLLM
 
@@ -85,8 +85,12 @@ def _contested_set(info: object) -> dict:
     freed = first["from"][0]
     first["from"] = ["innovator-1"]
     data["not_used"].append(
-        {"candidate": freed, "reason": "duplicate", "of": f"H{freed.rsplit('-', 1)[1]}",
-         "text": "same claim"}
+        {
+            "candidate": freed,
+            "reason": "duplicate",
+            "of": f"H{freed.rsplit('-', 1)[1]}",
+            "text": "same claim",
+        }
     )
     return data
 
@@ -206,7 +210,8 @@ def _two_round_reviewer(info: object) -> dict:
         return {"findings": [
             _finding("H1", "blocking", issue="no baseline"),
             _finding("H2", "blocking", issue="leaks"),
-            _finding("H3", "blocking", due="later", issue="pin the seed"),
+            {**_finding("H3", "blocking", due="later", issue="pin the seed"),
+             "category": "reproducibility"},
         ]}  # fmt: skip
     return {
         "findings": [
@@ -237,9 +242,33 @@ async def test_later_findings_are_minor_and_marked(tmp_path: Path) -> None:
     assert later[0]["severity"] == "minor"
     assert later[0]["issue"] == "[for experiment design] pin the seed"
     assert [f["severity"] for f in review["findings"] if f["hypothesis_id"] != "H3"] == [
-        "blocking", "blocking"
+        "blocking",
+        "blocking",
     ]
     assert "resolutions" not in review
+
+
+async def test_a_design_flaw_marked_later_stays_blocking(tmp_path: Path) -> None:
+    def reviewer_answer(info: object) -> dict:
+        return {"findings": [{**_finding("H1", "blocking", due="later", issue="leaks"),
+                              "category": "leakage"}]}  # fmt: skip
+
+    reviewer = FixtureLLM(overrides={"hypothesis_review": reviewer_answer})
+    services = _services(tmp_path, reviewer=reviewer)
+    result = await run_pipeline(request(review_phase=True), services)
+
+    review = services.store.artifacts(result.run_id).read_json(8, "review.json")
+    assert [(f["issue"], f["severity"]) for f in review["findings"]] == [("leaks", "blocking")]
+    assert review["passed"] is False
+
+
+async def test_a_finding_answered_twice_is_invalid() -> None:
+    owed = {"F1-1": {"hypothesis_id": "H1"}}
+    data = {"resolutions": [
+        {"finding_id": "F1-1", "status": "resolved", "reason": "fixed"},
+        {"finding_id": "F1-1", "status": "maintained", "reason": "still open"},
+    ]}  # fmt: skip
+    assert any("answered twice" in e for e in _check_resolutions(data, owed, {"H1"}).errors)
 
 
 async def test_missing_due_means_now_and_needs_evidence_is_never_later(tmp_path: Path) -> None:
@@ -247,7 +276,8 @@ async def test_missing_due_means_now_and_needs_evidence_is_never_later(tmp_path:
         no_due = _finding("H1", "blocking", issue="no baseline")
         del no_due["due"]
         later_evidence = {
-            **_finding("H2", "blocking", due="later", issue="no source"), "kind": "needs_evidence"
+            **_finding("H2", "blocking", due="later", issue="no source"),
+            "kind": "needs_evidence",
         }
         return {"findings": [no_due, later_evidence]}
 

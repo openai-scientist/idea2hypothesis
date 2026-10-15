@@ -110,7 +110,12 @@ def adopt(store: RunStore, prior_id: str, run_id: str, *, mode: str, review_phas
     source, target = store.artifacts(prior_id), store.artifacts(run_id)
     prior = _prior_set(source)
     text = _revision_text(prior)
-    review = source.read_json(int(Stage.HYPOTHESIS_GEN), "review.json") if prior else None
+    review = None
+    if prior:
+        try:
+            review = source.read_json(int(Stage.HYPOTHESIS_GEN), "review.json")
+        except (OSError, ValueError):
+            review = None  # the earlier run failed in its review step: no round to follow
     original = store.read_checkpoint(run_id)
     try:
         for n in REUSED_STAGES:

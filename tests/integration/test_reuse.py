@@ -212,7 +212,7 @@ def _convergence_reviewer(info: object) -> dict:
         return {"findings": [finding]}
     return {
         "findings": [{**finding, "issue": "new objection"}],
-        "resolutions": [{"finding_id": "F1-1", "status": "maintained", "reason": "leak stands"}],
+        "resolutions": [{"finding_id": "P1-1", "status": "maintained", "reason": "leak stands"}],
     }
 
 
@@ -228,5 +228,5 @@ async def test_reused_run_reviews_against_the_prior_runs_final_review(tmp_path: 
     assert "error" not in review
     by_issue = {f["issue"]: f for f in review["findings"]}
     assert by_issue["[unchanged] new objection"]["severity"] == "major"
-    assert by_issue["[maintains F1-1] leak stands"]["severity"] == "blocking"
-    assert [r["finding_id"] for r in review["resolutions"]] == ["F1-1"]
+    assert by_issue["[maintains P1-1] leak stands"]["severity"] == "blocking"
+    assert [r["finding_id"] for r in review["resolutions"]] == ["P1-1"]

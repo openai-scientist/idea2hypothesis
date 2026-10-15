@@ -769,7 +769,8 @@ sub_prompts:
       Due: "now" (the hypothesis must change before it goes on) or "later". Protocol details
       that experiment design fixes are "later": exact model or tool versions, seeds, replication
       counts, sample sizes, compute or energy caps, dataset revisions or hashes, exact fault
-      lists. Give them as findings only when they matter, and always as "later".
+      lists. Give them as findings only when they matter, and always as "later", with category
+      "reproducibility", "statistics" or "other". A leakage, baseline or control flaw is "now".
       Previous round: when the section below is not "none", this set is a revision after the
       researcher's comments. Do not move the target. For every previous finding with severity
       "blocking", return a resolution in "resolutions": {"finding_id": the previous id,

@@ -372,9 +372,7 @@ def check_merge(
         )
     if f.ok:
         unused = {c.id for c in candidates.values() if not c.fatal and c.id not in used}
-        for problem in _not_used_problems(
-            data, items, unused, maximum, candidates, lead_directed
-        ):
+        for problem in _not_used_problems(data, items, unused, maximum, candidates, lead_directed):
             f.error(problem)
     return f
 
@@ -666,6 +664,7 @@ def _check_revision_responses(data: dict[str, Any], owed: list[str]) -> Findings
 
 #: Prefixes the code puts on findings it downgrades, so the researcher and later stages see why.
 LATER_PREFIX = "[for experiment design] "
+LATER_CATEGORIES = ("reproducibility", "statistics", "other")
 UNCHANGED_PREFIX = "[unchanged] "
 #: Run file where ``pipeline.reuse.adopt`` keeps the earlier run's final set and review.
 PREVIOUS_ROUND = "reused_previous_round.json"
@@ -699,7 +698,8 @@ def _previous_round(
         reused = ctx.artifacts.read_run_json(PREVIOUS_ROUND)
         if not isinstance(reused, dict) or not isinstance(reused.get("review"), dict):
             return None
-        return _round_view(reused["review"], 1, reused.get("hypotheses"), hypotheses)
+        # "P" ids: this run's own round 1 also numbers its findings F1-n.
+        return _round_view(reused["review"], 1, reused.get("hypotheses"), hypotheses, prefix="P")
     archived = ctx.artifacts.read_archived_json(ctx.attempt - 1, STAGE, "hypotheses.json")
     if not isinstance(archived, dict):
         return None
@@ -708,7 +708,12 @@ def _previous_round(
 
 
 def _round_view(
-    review: Any, default_round: int, before: Any, hypotheses: list[dict[str, Any]]
+    review: Any,
+    default_round: int,
+    before: Any,
+    hypotheses: list[dict[str, Any]],
+    *,
+    prefix: str = "F",
 ) -> tuple[list[dict[str, Any]], set[str]] | None:
     if not isinstance(before, list):
         return None
@@ -716,7 +721,7 @@ def _round_view(
     if isinstance(review, dict):
         round_ = review.get("round", default_round)
         findings = [
-            {"id": f"F{round_}-{n}", **{k: f.get(k) for k in FINDING_FIELDS}}
+            {"id": f"{prefix}{round_}-{n}", **{k: f.get(k) for k in FINDING_FIELDS}}
             for n, f in enumerate(review.get("findings") or [], 1)
         ]
     return findings, changed_hypotheses(before, hypotheses)
@@ -761,6 +766,8 @@ def _check_resolutions(
         fid = str(item.get("finding_id")) if isinstance(item, dict) else ""
         if fid not in owed:
             f.error(f"resolution for {fid!r}: not a blocking finding of the previous round")
+        elif fid in answered:
+            f.error(f"resolution for {fid}: answered twice; give one status")
         elif item.get("status") not in RESOLUTION_STATUSES:
             f.error(f"resolution for {fid}: status must be one of {list(RESOLUTION_STATUSES)}")
         elif not _text(item.get("reason")):
@@ -856,8 +863,13 @@ async def review(ctx: StageContext) -> dict[str, Any]:
         )  # fmt: skip
         for item in data["findings"]:
             finding = {k: item.get(k) for k in FINDING_FIELDS}
-            # Evidence a hypothesis lacks cannot wait for experiment design.
-            if item.get("due", "now") == "later" and finding["kind"] != "needs_evidence":
+            # Only protocol details wait for experiment design; missing evidence and design
+            # flaws (leakage, baseline, control) cannot.
+            if (
+                item.get("due", "now") == "later"
+                and finding["kind"] != "needs_evidence"
+                and finding["category"] in LATER_CATEGORIES
+            ):
                 finding["severity"] = "minor"
                 finding["issue"] = LATER_PREFIX + str(finding["issue"])
             _keep_unchanged(finding, unchanged)
