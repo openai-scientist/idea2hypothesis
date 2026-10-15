@@ -766,6 +766,18 @@ sub_prompts:
       set below; "field" names the field of the hypothesis the finding is about (for example
       "statement", "prediction", "falsification_criteria"). Return no finding for a hypothesis
       without a problem.
+      Due: "now" (the hypothesis must change before it goes on) or "later". Protocol details
+      that experiment design fixes are "later": exact model or tool versions, seeds, replication
+      counts, sample sizes, compute or energy caps, dataset revisions or hashes, exact fault
+      lists. Give them as findings only when they matter, and always as "later".
+      Previous round: when the section below is not "none", this set is a revision after the
+      researcher's comments. Do not move the target. For every previous finding with severity
+      "blocking", return a resolution in "resolutions": {"finding_id": the previous id,
+      "status": "resolved" or "maintained", "reason": "..."}. Use "resolved" when the revision
+      fixed it or you now find it unfounded; use "maintained" only when the problem still
+      stands as written. Raise a new "blocking" finding only on a hypothesis the revision
+      changed (listed in "changed_hypotheses"); a hypothesis in "unchanged_hypotheses" has been
+      reviewed already, so a new problem there is at most "major".
 
       Topic: {{topic}}
       Goal:
@@ -781,7 +793,11 @@ sub_prompts:
       Evidence cards:
       {{cards_json}}
 
+      Previous round:
+      {{previous_json}}
+
       Allowed categories: {{categories}}
 
       {{> json_rules}}
-      Return {"findings": [{"hypothesis_id": "H1", "field": "prediction", "severity": "major", "category": "baseline", "kind": "fix", "issue": "...", "suggestion": "..."}]}
+      Return {"findings": [{"hypothesis_id": "H1", "field": "prediction", "severity": "major", "category": "baseline", "kind": "fix", "due": "now", "issue": "...", "suggestion": "..."}], "resolutions": [{"finding_id": "F1-2", "status": "resolved", "reason": "..."}]}
+      "resolutions" is [] when the previous round is "none".

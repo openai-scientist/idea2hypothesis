@@ -36,6 +36,9 @@ FINDING_CATEGORIES = (
 )  # fmt: skip
 FINDING_SEVERITIES = ("blocking", "major", "minor")
 FINDING_KINDS = ("fix", "needs_evidence")
+#: When a finding must be settled: ``later`` details are fixed by experiment design.
+FINDING_DUE = ("now", "later")
+RESOLUTION_STATUSES = ("resolved", "maintained")
 REVISION_OUTCOMES = ("fixed", "rebutted", "not_fixed")
 CARD_FIELDS = ("problem", "method", "data", "metrics", "findings", "limitations")
 CARD_CONTENT_FIELDS = ("problem", "method", "findings", "limitations")

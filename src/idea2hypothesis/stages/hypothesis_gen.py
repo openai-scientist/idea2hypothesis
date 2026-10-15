@@ -20,10 +20,12 @@ from idea2hypothesis.literature.novelty import Judge, check_novelty
 from idea2hypothesis.pipeline.contracts import (
     EQUIVALENCE,
     FINDING_CATEGORIES,
+    FINDING_DUE,
     FINDING_KINDS,
     FINDING_SEVERITIES,
     MIN_HYPOTHESES,
     PREDICTIONS,
+    RESOLUTION_STATUSES,
     REVISION_OUTCOMES,
     Findings,
     check_hypotheses,
@@ -662,7 +664,54 @@ def _check_revision_responses(data: dict[str, Any], owed: list[str]) -> Findings
     return f
 
 
-def _check_review(data: Any, ids: set[str]) -> Findings:
+#: Prefixes the code puts on findings it downgrades, so the researcher and later stages see why.
+LATER_PREFIX = "[for experiment design] "
+UNCHANGED_PREFIX = "[unchanged] "
+#: Hypothesis fields whose change counts as a revision (derived fields such as caveats do not).
+CONTENT_FIELDS = (
+    "statement", "gap_id", "evidence_refs", "exposure", "outcome", "estimand", "method",
+    "conditions", "prediction", "equivalence_margin", "falsification_criteria", "rationale",
+    "novelty", "risk", "tension_ids",
+)  # fmt: skip
+FINDING_FIELDS = ("hypothesis_id", "field", "severity", "category", "kind", "issue", "suggestion")
+
+
+def changed_hypotheses(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> set[str]:
+    """Ids of the hypotheses of ``after`` that are new or differ in content from ``before``."""
+    old = {str(h["id"]): h for h in before}
+    return {
+        str(h["id"])
+        for h in after
+        if str(h["id"]) not in old
+        or any(h.get(k) != old[str(h["id"])].get(k) for k in CONTENT_FIELDS)
+    }
+
+
+def _previous_round(
+    ctx: StageContext, hypotheses: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], set[str]] | None:
+    """The previous round's findings (with their wire ids) and the hypotheses the revision
+    changed; ``None`` in the first round (no archived set from a Platform comment)."""
+    if ctx.attempt < 2:
+        return None
+    archived = ctx.artifacts.read_archived_json(ctx.attempt - 1, STAGE, "hypotheses.json")
+    if not isinstance(archived, dict) or not isinstance(archived.get("hypotheses"), list):
+        return None
+    review = ctx.artifacts.read_archived_json(ctx.attempt - 1, STAGE, "review.json")
+    findings: list[dict[str, Any]] = []
+    if isinstance(review, dict):
+        round_ = review.get("round", ctx.attempt - 1)
+        findings = [
+            {"id": f"F{round_}-{n}", **{k: f.get(k) for k in FINDING_FIELDS}}
+            for n, f in enumerate(review.get("findings") or [], 1)
+        ]
+    return findings, changed_hypotheses(archived["hypotheses"], hypotheses)
+
+
+def _check_review(
+    data: Any, ids: set[str], owed: dict[str, dict[str, Any]] | None = None
+) -> Findings:
+    """``owed`` holds the blocking findings of the previous round, each needing a resolution."""
     f = Findings()
     items = data.get("findings") if isinstance(data, dict) else None
     if not f.require(isinstance(items, list), "the answer needs a 'findings' list"):
@@ -677,11 +726,68 @@ def _check_review(data: Any, ids: set[str]) -> Findings:
         f.require(item.get("severity") in FINDING_SEVERITIES, f"finding {n}: bad severity")
         f.require(item.get("category") in FINDING_CATEGORIES, f"finding {n}: bad category")
         f.require(item.get("kind") in FINDING_KINDS, f"finding {n}: bad kind")
+        f.require(
+            item.get("due") in FINDING_DUE, f"finding {n}: 'due' must be one of {list(FINDING_DUE)}"
+        )
+    if owed:
+        f.extend(_check_resolutions(data, owed, ids))
     return f
+
+
+def _check_resolutions(
+    data: dict[str, Any], owed: dict[str, dict[str, Any]], ids: set[str]
+) -> Findings:
+    f = Findings()
+    items = data.get("resolutions")
+    if not f.require(isinstance(items, list), "the answer needs a 'resolutions' list"):
+        return f
+    answered: set[str] = set()
+    for item in items:
+        fid = str(item.get("finding_id")) if isinstance(item, dict) else ""
+        if fid not in owed:
+            f.error(f"resolution for {fid!r}: not a blocking finding of the previous round")
+        elif item.get("status") not in RESOLUTION_STATUSES:
+            f.error(f"resolution for {fid}: status must be one of {list(RESOLUTION_STATUSES)}")
+        elif not _text(item.get("reason")):
+            f.error(f"resolution for {fid}: 'reason' is missing")
+        elif item["status"] == "maintained" and str(owed[fid]["hypothesis_id"]) not in ids:
+            f.error(f"resolution for {fid}: its hypothesis is no longer in the set; it is resolved")
+        else:
+            answered.add(fid)
+    missing = [i for i in owed if i not in answered]
+    f.require(not missing, f"resolutions do not answer the findings: {', '.join(missing)}")
+    return f
+
+
+def _earlier_findings(
+    resolutions: list[dict[str, Any]], owed: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """A previous blocking finding the reviewer maintains stays blocking in this round."""
+    return [
+        {
+            **{k: owed[r["finding_id"]][k] for k in FINDING_FIELDS},
+            "severity": "blocking",
+            "issue": f"[maintains {r['finding_id']}] {_text(r['reason'])}",
+        }
+        for r in resolutions
+        if r["status"] == "maintained"
+    ]
+
+
+def _keep_unchanged(finding: dict[str, Any], unchanged: set[str]) -> None:
+    """A new blocking finding on a hypothesis the revision did not change is only major."""
+    if finding["severity"] == "blocking" and finding["hypothesis_id"] in unchanged:
+        finding["severity"] = "major"
+        finding["issue"] = UNCHANGED_PREFIX + str(finding["issue"])
 
 
 async def review(ctx: StageContext) -> dict[str, Any]:
     """One call of the review model on the final set; writes ``review.json`` and returns it.
+
+    After a revision (a Platform comment) the review converges: the previous round's blocking
+    findings are answered with a resolution, and a new blocking finding on a hypothesis the
+    revision did not change is only major. A finding due later (protocol details that
+    experiment design fixes) is minor.
 
     When the reviewer cannot give a valid answer, ``review.json`` records the error and the
     researcher decides (the gate opens with the error); nothing is invented in its place.
@@ -692,6 +798,9 @@ async def review(ctx: StageContext) -> dict[str, Any]:
         await ctx.on_phase("reviewing")
     doc = ctx.artifacts.read_json(STAGE, "hypotheses.json")
     ids = {str(h["id"]) for h in doc["hypotheses"]}
+    previous = _previous_round(ctx, doc["hypotheses"])
+    owed = {f["id"]: f for f in previous[0] if f["severity"] == "blocking"} if previous else {}
+    unchanged = ids - previous[1] if previous else set()
     novelty = (
         ctx.artifacts.read_json(STAGE, "novelty_report.json")
         if ctx.artifacts.exists(STAGE, "novelty_report.json")
@@ -700,6 +809,15 @@ async def review(ctx: StageContext) -> dict[str, Any]:
     view = {k: doc.get(k) for k in (
         "hypotheses", "held_back", "not_used", "open_tensions", "disagreements"
     )}  # fmt: skip
+    previous_view = (
+        {
+            "findings": previous[0],
+            "changed_hypotheses": sorted(previous[1]),
+            "unchanged_hypotheses": sorted(unchanged),
+        }
+        if previous
+        else None
+    )
     prompt = ctx.prompts.render(
         "hypothesis_review",
         topic=ctx.topic,
@@ -708,6 +826,7 @@ async def review(ctx: StageContext) -> dict[str, Any]:
         novelty_json=compact_json(novelty) if novelty else "none",
         cards_json=compact_json([_evidence_view(c) for c in load_cards(ctx)]),
         categories=", ".join(FINDING_CATEGORIES),
+        previous_json=compact_json(previous_view) if previous_view else "none",
     )
     reviewer_cfg = ctx.config.llm.reviewer
     result: dict[str, Any] = {
@@ -718,14 +837,20 @@ async def review(ctx: StageContext) -> dict[str, Any]:
     try:
         data, _ = await request_json(
             ctx, prompt, label="hypothesis review", llm=ctx.reviewer,
-            validate=lambda d: _check_review(d, ids),
+            validate=lambda d: _check_review(d, ids, owed),
         )  # fmt: skip
-        result["findings"] = [
-            {k: item.get(k) for k in (
-                "hypothesis_id", "field", "severity", "category", "kind", "issue", "suggestion"
-            )}
-            for item in data["findings"]
-        ]  # fmt: skip
+        for item in data["findings"]:
+            finding = {k: item.get(k) for k in FINDING_FIELDS}
+            if item["due"] == "later":
+                finding["severity"] = "minor"
+                finding["issue"] = LATER_PREFIX + str(finding["issue"])
+            _keep_unchanged(finding, unchanged)
+            result["findings"].append(finding)
+        if owed:
+            result["resolutions"] = [
+                {k: r[k] for k in ("finding_id", "status", "reason")} for r in data["resolutions"]
+            ]
+            result["findings"] += _earlier_findings(result["resolutions"], owed)
     except StageFailure as exc:
         if exc.code != "LLM_OUTPUT_INVALID":
             raise
@@ -735,11 +860,13 @@ async def review(ctx: StageContext) -> dict[str, Any]:
     for h in doc["hypotheses"]:
         if h.get("contested") and str(h["id"]) not in blocked:
             standing = "; ".join(f"{o['from']}: {o['text']}" for o in h["contested"])
-            result["findings"].append({
+            finding = {
                 "hypothesis_id": str(h["id"]), "field": "statement", "severity": "blocking",
                 "category": "evidence", "kind": "needs_evidence", "issue": standing,
                 "suggestion": None,
-            })  # fmt: skip
+            }  # fmt: skip
+            _keep_unchanged(finding, unchanged)
+            result["findings"].append(finding)
     result["passed"] = "error" not in result and not any(
         f["severity"] == "blocking" for f in result["findings"]
     )

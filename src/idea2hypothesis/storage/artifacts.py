@@ -226,6 +226,14 @@ class ArtifactStore:
         shutil.rmtree(self.stage_dir(stage), ignore_errors=True)
         self.stage_dir(stage).mkdir(parents=True, exist_ok=True)
 
+    def read_archived_json(self, attempt: int, stage: int, relpath: str) -> Any | None:
+        """A file that ``invalidate_from`` moved to ``attempts/<attempt>``, or ``None``."""
+        try:
+            path = self.run_dir / "attempts" / str(attempt) / stage_dirname(stage) / relpath
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
     def invalidate_from(self, stage: int, attempt: int) -> list[int]:
         """Move ``stage-NN`` (NN >= ``stage``) into ``attempts/<attempt>/`` before a rerun."""
         moved: list[int] = []

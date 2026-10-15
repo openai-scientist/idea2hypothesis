@@ -466,7 +466,8 @@ class FixtureLLM:
         hypotheses = info.section_json("Hypotheses under review", "Novelty report:")["hypotheses"]
         return {"findings": [{
             "hypothesis_id": hypotheses[0]["id"], "field": "prediction", "severity": "minor",
-            "category": "baseline", "kind": "fix", "issue": "name the comparison condition",
+            "category": "baseline", "kind": "fix", "due": "now",
+            "issue": "name the comparison condition",
             "suggestion": "state the baseline",
         }]}  # fmt: skip
 
