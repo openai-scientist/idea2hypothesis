@@ -15,24 +15,33 @@ from idea2hypothesis.pipeline import gates
 from idea2hypothesis.pipeline.contracts import validate_stage
 from idea2hypothesis.pipeline.models import Stage
 from idea2hypothesis.pipeline.usage import UsageMeter
-from idea2hypothesis.stages.hypothesis_gen import LEAD_DIRECTION_PREFIXES, PREVIOUS_ROUND
-from idea2hypothesis.stages.problem_decompose import LEAD_FRAMING_PREFIXES
+from idea2hypothesis.stages.hypothesis_gen import PREVIOUS_ROUND
 from idea2hypothesis.storage.runs import RunStore, utc_now
 
 #: Stages whose artifacts a new run copies (everything before the hypotheses).
 REUSED_STAGES = tuple(range(1, int(Stage.HYPOTHESIS_GEN)))
 
+
 def _domains(names: Sequence[str]) -> list[str]:
     return sorted({n.strip().lower() for n in names if n.strip()})
 
 
-def _framing(constraints: Sequence[str]) -> list[str]:
-    """The lead's framing lines; direction for stage 8 (a handoff, send-back feedback) is not."""
-    return sorted(
-        c.strip()
-        for c in constraints
-        if c.startswith(LEAD_FRAMING_PREFIXES) and not c.startswith(LEAD_DIRECTION_PREFIXES)
+#: Lines the Platform derives from the charter: they frame the question stages 1-7 answer.
+#: Directives, handoffs, known risks and send-back feedback are direction for stage 8.
+CHARTER_PREFIXES = tuple(
+    f"Research lead: {name}: "
+    for name in (
+        "Research question",
+        "Topic given by the researcher",
+        "Success criterion",
+        "Objective",
     )
+)
+
+
+def _framing(constraints: Sequence[str]) -> list[str]:
+    """The charter's framing lines; any other line may differ between the two runs."""
+    return sorted(c.strip() for c in constraints if c.startswith(CHARTER_PREFIXES))
 
 
 def problem(
@@ -92,9 +101,7 @@ def _prior_set(source: Any) -> dict[str, Any] | None:
     return prior
 
 
-def adopt(
-    store: RunStore, prior_id: str, run_id: str, *, mode: str, review_phase: bool
-) -> None:
+def adopt(store: RunStore, prior_id: str, run_id: str, *, mode: str, review_phase: bool) -> None:
     """Copy stages 1-7 of ``prior_id`` into ``run_id`` as completed and set the revision feedback.
 
     Everything that can fail is built before the run is changed. On any failure the copied

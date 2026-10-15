@@ -44,7 +44,8 @@ async def test_prior_run_stages_are_reused_and_its_set_is_revised(tmp_path: Path
 
     second = await run_pipeline(
         request(
-            review_phase=True, prior_run_id=first.run_id,
+            review_phase=True,
+            prior_run_id=first.run_id,
             constraints=("Research lead: Handoff: tighten the baseline",),
         ),
         services,
@@ -109,7 +110,8 @@ async def test_prior_run_with_other_topic_is_not_reused(tmp_path: Path) -> None:
 
     second = await run_pipeline(
         request(
-            review_phase=True, prior_run_id=first.run_id,
+            review_phase=True,
+            prior_run_id=first.run_id,
             topic="Effect of caffeine intake on exam performance in university students",
         ),
         services,
@@ -165,6 +167,24 @@ async def test_prior_run_with_other_framing_is_not_reused(tmp_path: Path) -> Non
     assert "different framing" in _notices(services, second.run_id)[0]
 
 
+async def test_new_directive_or_handoff_does_not_block_reuse(tmp_path: Path) -> None:
+    question = "Research lead: Research question: does sleep help?"
+    services, fresh, second, _ = await _second_run(
+        tmp_path,
+        {"constraints": (question,)},
+        {
+            "constraints": (
+                question,
+                "Research lead: Directive: public data only",
+                "Research lead: Handoff: tighten H1",
+            )
+        },
+    )
+
+    assert fresh.count("topic_init") == 0
+    assert "Reused stages 1-7" in _notices(services, second.run_id)[0]
+
+
 async def test_failure_while_adopting_runs_every_stage_with_a_generic_notice(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -201,9 +221,7 @@ async def test_reused_run_reviews_against_the_prior_runs_final_review(tmp_path: 
     services.reviewer = FixtureLLM(overrides={"hypothesis_review": _convergence_reviewer})
     first = await run_pipeline(request(review_phase=True), services)
 
-    second = await run_pipeline(
-        request(review_phase=True, prior_run_id=first.run_id), services
-    )
+    second = await run_pipeline(request(review_phase=True, prior_run_id=first.run_id), services)
 
     assert second.status is RunStatus.AWAITING_REVIEW, second.error
     review = services.store.artifacts(second.run_id).read_json(8, "review.json")
