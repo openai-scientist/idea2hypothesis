@@ -6,10 +6,12 @@ import json
 import os
 import re
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha1
 from pathlib import Path
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from idea2hypothesis.pipeline.events import Event
 from idea2hypothesis.storage.artifacts import ArtifactStore, write_json_atomic
@@ -38,6 +40,89 @@ def safe_index_name(identifier: str) -> str:
     return cleaned
 
 
+_T = TypeVar("_T")
+
+
+@dataclass
+class _Tail(Generic[_T]):
+    sig: tuple[int, int, int]
+    offset: int = 0  # end of the last complete line consumed
+    records: list[_T] = field(default_factory=list)  # parsed from complete lines
+    partial: list[_T] = field(default_factory=list)  # parsed from an unterminated final line
+    stopped: bool = False  # a bad line ended parsing (``stop_on_error`` only)
+
+
+class JsonlCache(Generic[_T]):
+    """Stat-validated incremental reader for append-only JSONL files.
+
+    A read stats the file. An unchanged file returns the cached records, a file that only grew
+    (same inode, larger size) parses just the new bytes, and any other change re-reads it all.
+    ``parse`` raises ``ValueError``/``KeyError`` for a bad line: it is skipped, or with
+    ``stop_on_error`` it ends parsing. An unterminated final line is parsed for the result but
+    not consumed, so a torn write is retried once it is completed. Records are shared with the
+    cache: callers must treat them as read-only.
+    """
+
+    def __init__(self, parse: Callable[[str], _T], *, stop_on_error: bool = False) -> None:
+        self._parse = parse
+        self._stop_on_error = stop_on_error
+        self._lock = threading.Lock()
+        self._entries: dict[Path, _Tail[_T]] = {}
+
+    def drop(self, path: Path) -> None:
+        with self._lock:
+            self._entries.pop(path, None)
+
+    def read(self, path: Path) -> list[_T]:
+        with self._lock:
+            try:
+                st = os.stat(path)
+            except OSError:
+                self._entries.pop(path, None)
+                return []
+            sig = (st.st_size, st.st_mtime_ns, st.st_ino)
+            entry = self._entries.get(path)
+            if entry is not None and entry.sig == sig:
+                return entry.records + entry.partial
+            if entry is None or sig[2] != entry.sig[2] or sig[0] <= entry.sig[0]:
+                entry = _Tail(sig)
+            entry.sig = sig
+            try:
+                with path.open("rb") as handle:
+                    handle.seek(entry.offset)
+                    data = handle.read()
+            except OSError:
+                self._entries.pop(path, None)
+                return []
+            cut = data.rfind(b"\n") + 1
+            if not entry.stopped:
+                complete = data[:cut].decode("utf-8")
+                entry.records.extend(self._parse_lines(entry, complete.splitlines()))
+                entry.partial = []
+                if not entry.stopped:
+                    try:
+                        rest = data[cut:].decode("utf-8")
+                    except UnicodeDecodeError:
+                        rest = ""
+                    entry.partial = self._parse_lines(entry, rest.splitlines())
+            entry.offset += cut
+            self._entries[path] = entry
+            return entry.records + entry.partial
+
+    def _parse_lines(self, entry: _Tail[_T], lines: list[str]) -> list[_T]:
+        out: list[_T] = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                out.append(self._parse(line))
+            except (ValueError, KeyError):
+                if self._stop_on_error:
+                    entry.stopped = True
+                    break
+        return out
+
+
 class RunStore:
     """All state of a run lives under ``<root>/<run_id>/`` as plain files."""
 
@@ -47,6 +132,7 @@ class RunStore:
         self._guard = threading.Lock()
         self._locks: dict[str, threading.RLock] = {}
         self._next_seq: dict[str, int] = {}
+        self._events = JsonlCache(lambda line: Event.from_dict(json.loads(line)))
 
     # -- paths and locks --------------------------------------------------
 
@@ -146,20 +232,7 @@ class RunStore:
         return self.run_dir(run_id) / "events.jsonl"
 
     def _scan_events(self, run_id: str) -> list[Event]:
-        path = self._events_path(run_id)
-        events: list[Event] = []
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return events
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                events.append(Event.from_dict(json.loads(line)))
-            except (ValueError, KeyError):
-                continue  # a torn final line after a crash is ignored
-        return events
+        return self._events.read(self._events_path(run_id))
 
     def append_event(
         self,
