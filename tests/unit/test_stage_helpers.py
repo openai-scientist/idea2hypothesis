@@ -614,9 +614,10 @@ def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why(
         [{**one, "merge_note": " "}, *rest]
     )
     clash = {"id": "H1", "from": ["pragmatist-1", "contrarian-1"], "merge_note": note}
-    assert "predict different effects" in errors(
-        [clash, rest[1], {"id": "H3", "from": ["innovator-1"]}]
-    )
+    merge_clash = errors([clash, rest[1], {"id": "H3", "from": ["innovator-1"]}])
+    assert "predict different effects" in merge_clash
+    assert "canonical orientation (exposure minus comparator)" in merge_clash
+    assert "keep them separate" in merge_clash
     # innovator-2 is cleared and unused: it needs a reason
     assert "candidates ['innovator-2'] are not used" in errors([one, rest[0]])
     dup = {"candidate": "innovator-2", "reason": "duplicate", "of": "H1", "text": "same claim"}
@@ -647,7 +648,10 @@ def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why(
     assert "is used by the set" in errors([one, *rest], [{**dup, "candidate": "pragmatist-1"}])
     assert "say why in text" in errors([one, rest[0]], [{**dup, "text": ""}])
     # a duplicate repeats the claim of the hypothesis it names
-    assert "it is not a duplicate" in errors([one, rest[0]], [{**dup, "of": "H2"}])
+    sign_clash = errors([one, rest[0]], [{**dup, "of": "H2"}])
+    assert "only the subtraction order differs" in sign_clash
+    assert "canonical orientation (exposure minus comparator)" in sign_clash
+    assert "use it, or give over_limit" in sign_clash
 
 
 def test_a_benefit_and_a_negligible_effect_are_never_merged() -> None:

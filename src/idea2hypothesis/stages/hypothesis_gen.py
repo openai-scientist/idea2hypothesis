@@ -203,6 +203,15 @@ NOT_USED_REASONS = ("duplicate", "over_limit", "lead_direction")
 LEAD_DIRECTION_PREFIXES = ("Research lead: Handoff:", "Feedback from a later stage: ")
 
 
+#: The sign of a prediction follows the estimand's subtraction order, so a sign clash may be
+#: a wording difference only.
+_SIGN_ADVICE = (
+    "if the claims are the same and only the subtraction order differs, rewrite them in the "
+    "canonical orientation (exposure minus comparator) so the predictions match; if they truly "
+    "predict opposite effects, keep them separate"
+)
+
+
 def _merge_problems(
     tag: str, h: dict[str, Any], sources: list[str], candidates: dict[str, Candidate]
 ) -> list[str]:
@@ -215,7 +224,7 @@ def _merge_problems(
     if len(signs) > 1 and signs <= set(PREDICTIONS):
         problems.append(
             f"{tag}: merges candidates that predict different effects ({sorted(map(str, signs))});"
-            " keep them as separate hypotheses"
+            f" {_SIGN_ADVICE}"
         )
     # Negligible-effect candidates also claim a size: "within ± margin".
     margins = {
@@ -273,8 +282,8 @@ def _not_used_problems(
             # Two negligible-effect claims that differ only in margin are one study: a duplicate.
             problems.append(
                 f"{tag}: {c} predicts {_predicts(candidates[c].hypothesis)} but {entry['of']} "
-                f"predicts {_predicts(final[str(entry['of'])])}; it is not a duplicate: use it, "
-                "or give over_limit when the set is full"
+                f"predicts {_predicts(final[str(entry['of'])])}; {_SIGN_ADVICE}; if they are "
+                "separate claims, use it, or give over_limit when the set is full"
             )
         elif reason == "over_limit" and len(items) < maximum:
             problems.append(f"{tag}: the set has {len(items)} of at most {maximum} hypotheses; "

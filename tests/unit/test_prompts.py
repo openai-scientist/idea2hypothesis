@@ -211,3 +211,9 @@ def test_a_prompt_temperature_outside_zero_to_one_is_rejected(tmp_path: Path) ->
     override.write_text("stages:\n  synthesis:\n    temperature: 0.2\n", encoding="utf-8")
     loader = PromptLoader("ml", override)
     assert loader.render("synthesis", **STAGE_VARIABLES["synthesis"]).temperature == 0.2
+
+
+def test_hypothesis_schema_fixes_the_estimand_orientation() -> None:
+    schema = PromptLoader("ml").snapshot()["blocks"]["hypothesis_schema"]
+    assert "exposure condition minus comparator condition" in schema
+    assert "'retrieval reduces error rate' is '< 0'" in schema

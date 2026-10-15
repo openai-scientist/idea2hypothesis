@@ -35,10 +35,10 @@ blocks:
       "evidence_refs": ["card or paper ids copied from the synthesis/cards, at least one"],
       "exposure": "intervention, manipulated variable or condition",
       "outcome": "measurable outcome with metric and unit",
-      "estimand": "the statistical or physical quantity to be estimated",
+      "estimand": "the quantity to be estimated, always written as exposure condition minus comparator condition (treated minus control, with minus without)",
       "method": "how the claim would be tested",
       "conditions": "population or regime where the claim applies",
-      "prediction": "> 0   or   < 0   or   != 0   or   ≈ 0   (the expected effect: positive, negative, non-zero in either direction, or negligible)",
+      "prediction": "> 0   or   < 0   or   != 0   or   ≈ 0   (the sign of the estimand, exposure minus comparator, on the outcome as defined: 'retrieval reduces error rate' is '< 0'; or non-zero in either direction, or negligible)",
       "equivalence_margin": 0.1,   (only for ≈ 0: a bare JSON number in the outcome's unit, no text or unit; effects within ± it count as negligible; null for the other predictions)
       "falsification_criteria": "the specific observation that would prove the claim WRONG, with a threshold or interval, not 'results differ from expectations'",
       "limitations": ["known boundary conditions or weaknesses"],
