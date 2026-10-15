@@ -51,6 +51,7 @@ before finishing a change.
 ```bash
 python -m ruff check .
 python -m pytest -q
+uv run --with pytest-xdist pytest -q -p no:cacheprovider -n 8  # full suite in parallel, ~2.5 min
 python -m build
 python tools/serve_api.py          # needs I2H_CONFIG or configs/example.yaml
 python tools/dashboard/server.py   # run viewer
