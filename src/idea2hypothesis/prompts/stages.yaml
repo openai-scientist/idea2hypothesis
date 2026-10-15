@@ -299,6 +299,9 @@ stages:
          be real scholarly work). citation_count null means the source does not count citations
          (arXiv records): it says nothing about the paper. Few or no citations count against a
          paper only when it is several years old; recent work has had no time to be cited.
+      6. METADATA MISMATCH: sources sometimes attach another paper's abstract to a record. When the
+         abstract clearly describes a different study than the title, judge the paper by its title
+         and venue only, and start "reason" with "abstract mismatch:".
 
       SCORES are separate from the decision. Score each paper on the anchors below first, then
       decide with the rules above. A paper that uses the topic's own terms for a problem in another
