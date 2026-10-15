@@ -694,10 +694,17 @@ def _rejection_feedback(
     if spec.kind == gates.HYPOTHESES:
         try:
             doc = art.read_json(8, "hypotheses.json")
-            lines.append(
-                "- Previous hypotheses (write a better set, not the same one): "
-                + "; ".join(f"{h['id']}: {h['statement']}" for h in doc["hypotheses"])
-            )
+            previous = "; ".join(f"{h['id']}: {h['statement']}" for h in doc["hypotheses"])
+            if review_round is not None:
+                lines.append(
+                    "- Keep every hypothesis that no finding above concerns unchanged (same id, "
+                    "same statement); change only what the findings require. Previous "
+                    f"hypotheses: {previous}"
+                )
+            else:
+                lines.append(
+                    f"- Previous hypotheses (write a better set, not the same one): {previous}"
+                )
         except (OSError, ValueError, KeyError):
             pass
     if spec.kind == gates.SCREEN:

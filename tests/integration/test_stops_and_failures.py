@@ -93,6 +93,35 @@ async def test_low_topic_score_stops_after_stage_2(tmp_path: Path) -> None:
     assert evaluation["overall"] == 2.7  # recomputed from the three scores, not trusted
 
 
+async def test_research_lead_direction_waives_the_topic_threshold(tmp_path: Path) -> None:
+    llm = FixtureLLM(
+        overrides={
+            "topic_evaluation": {
+                "novelty": 2,
+                "specificity": 3,
+                "feasibility": 3,
+                "overall": 9,
+                "reasons": {"novelty": "n", "specificity": "s", "feasibility": "f"},
+                "suggestion": "narrow it",
+            }
+        }
+    )
+    services = make_services(tmp_path, llm=llm, review={"mode": "auto"})
+    result = await run_pipeline(
+        request(constraints=("Research lead: study sleep and exam scores",)), services
+    )
+
+    assert result.error is None or result.error.code != "TOPIC_BELOW_THRESHOLD"
+    assert 2 in result.completed_stages
+    evaluation = services.store.artifacts(result.run_id).read_json(2, "topic_evaluation.json")
+    assert evaluation["threshold_waived"] == {
+        "reason": "the run has research-lead direction",
+        "score": 2.7,
+        "threshold": evaluation["threshold"],
+        "advice": "narrow it",
+    }
+
+
 async def test_invalid_json_is_repaired_once_then_accepted(tmp_path: Path) -> None:
     llm = FixtureLLM(overrides={"problem_decompose": ["this is not json at all"]})
     services = make_services(tmp_path, llm=llm, review={"mode": "auto"})

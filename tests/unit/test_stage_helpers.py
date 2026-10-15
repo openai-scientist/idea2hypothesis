@@ -853,3 +853,40 @@ def test_prefilter_whole_word_match_allows_a_plural():
 
     assert keyword_overlap("two new benchmarks for dense retrieval", ["benchmark", "dense"]) == 2
     assert keyword_overlap("an html parser", ["ml"]) == 0
+
+
+class _FeedbackArtifacts:
+    def read_run_json(self, name: str):
+        return [
+            {
+                "finding_id": "f1",
+                "anchor": {"locator": "H2"},
+                "issue": "no falsifier",
+                "suggestion": "add one",
+            }
+        ]
+
+    def read_json(self, stage: int, name: str) -> dict:
+        return {"hypotheses": [{"id": "H1", "statement": "A raises B"}]}
+
+
+def test_a_review_revision_keeps_the_hypotheses_no_finding_concerns():
+    from idea2hypothesis.pipeline import gates
+    from idea2hypothesis.pipeline.runner import _rejection_feedback
+
+    spec = gates.gate_by_kind(gates.HYPOTHESES)
+    text = _rejection_feedback(spec, _FeedbackArtifacts(), "", review_round=1)
+    assert "finding f1 at H2" in text
+    assert "no finding above concerns unchanged (same id, same statement)" in text
+    assert "H1: A raises B" in text
+    assert "write a better set" not in text
+
+
+def test_a_plain_rejection_still_asks_for_a_better_set():
+    from idea2hypothesis.pipeline import gates
+    from idea2hypothesis.pipeline.runner import _rejection_feedback
+
+    spec = gates.gate_by_kind(gates.HYPOTHESES)
+    text = _rejection_feedback(spec, _FeedbackArtifacts(), "too vague")
+    assert "write a better set, not the same one" in text
+    assert "unchanged" not in text
