@@ -454,7 +454,9 @@ stages:
       LEFT OUT: every CLEARED or CAVEATS candidate the set does not use goes in "not_used" with
       its "reason": "duplicate" (a final hypothesis with the same prediction already tests its
       claim; give that hypothesis's id in "of"; for "≈ 0" with another margin, name both margins
-      in "text") or "over_limit" (the set already has {{max_hypotheses}} hypotheses); "text"
+      in "text"), "over_limit" (the set already has {{max_hypotheses}} hypotheses) or
+      "lead_direction" (a "Research lead:" or "Feedback from a later stage:" constraint, or a
+      review comment, excludes the claim; name that direction in "text"); "text"
       says in one sentence why it is left out rather than another. When the limit forces you to
       leave candidates out, leave out first those whose claim another final hypothesis already
       contains (a part of a broader claim in the set), before any candidate that makes a claim no

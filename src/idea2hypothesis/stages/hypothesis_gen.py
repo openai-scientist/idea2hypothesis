@@ -197,7 +197,9 @@ def _evidence_view(card: dict[str, Any]) -> dict[str, Any]:
 
 
 #: Why a candidate with no fatal objection standing is left out of the final set.
-NOT_USED_REASONS = ("duplicate", "over_limit")
+NOT_USED_REASONS = ("duplicate", "over_limit", "lead_direction")
+#: Run-constraint prefixes that carry the research lead's direction to this stage.
+LEAD_DIRECTION_PREFIXES = ("Research lead: ", "Feedback from a later stage: ")
 
 
 def _merge_problems(
@@ -242,6 +244,7 @@ def _not_used_problems(
     unused: set[str],
     maximum: int,
     candidates: dict[str, Candidate],
+    lead_directed: bool = False,
 ) -> list[str]:
     """Every candidate without a fatal objection that the set leaves out says why."""
     raw = data.get("not_used") or []
@@ -275,6 +278,10 @@ def _not_used_problems(
         elif reason == "over_limit" and len(items) < maximum:
             problems.append(f"{tag}: the set has {len(items)} of at most {maximum} hypotheses; "
                             f"there is room for {c}")  # fmt: skip
+        elif reason == "lead_direction" and not lead_directed:
+            problems.append(f"{tag}: this run has no research-lead direction (no 'Research lead:' "
+                            f"or 'Feedback from a later stage:' constraint, no review comments); "
+                            f"use {c} or give duplicate or over_limit")  # fmt: skip
         if not _text(entry.get("text")):
             problems.append(f"{tag}: say why in text")
     missing = sorted(unused - seen)
@@ -289,7 +296,11 @@ def _text(value: Any) -> str:
 
 
 def check_merge(
-    data: Any, candidates: dict[str, Candidate], minimum: int, maximum: int
+    data: Any,
+    candidates: dict[str, Candidate],
+    minimum: int,
+    maximum: int,
+    lead_directed: bool = False,
 ) -> Findings:
     """The final set's size, its sources, the rule that a candidate with a fatal objection
     standing is used only when the set cannot be filled from cleared ones, merges that keep
@@ -331,7 +342,9 @@ def check_merge(
         )
     if f.ok:
         unused = {c.id for c in candidates.values() if not c.fatal and c.id not in used}
-        for problem in _not_used_problems(data, items, unused, maximum, candidates):
+        for problem in _not_used_problems(
+            data, items, unused, maximum, candidates, lead_directed
+        ):
             f.error(problem)
     return f
 
@@ -506,10 +519,18 @@ async def run(ctx: StageContext) -> list[str]:
         re.findall(r"^- finding (\S+) at ", ctx.feedback, re.MULTILINE) if ctx.review_phase else []
     )
 
+    lead_directed = bool(owed) or any(
+        c.startswith(LEAD_DIRECTION_PREFIXES) for c in ctx.constraints
+    )
+
     def validate(data: dict[str, Any]) -> Findings:
         normalise_hypotheses(data)
         f = check_hypotheses(data, valid_gaps, valid_refs, valid_tensions)
-        f.extend(check_merge(data, candidates, research.min_hypotheses, research.max_hypotheses))
+        f.extend(
+            check_merge(
+                data, candidates, research.min_hypotheses, research.max_hypotheses, lead_directed
+            )
+        )
         if owed:
             f.extend(_check_revision_responses(data, owed))
         return f

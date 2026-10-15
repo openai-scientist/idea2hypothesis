@@ -591,9 +591,14 @@ def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why(
         )
     }
 
-    def errors(hyps: list[dict], not_used: list[dict] | None = None, maximum: int = 6) -> str:
+    def errors(
+        hyps: list[dict],
+        not_used: list[dict] | None = None,
+        maximum: int = 6,
+        lead_directed: bool = False,
+    ) -> str:
         data = {"hypotheses": hyps, "not_used": not_used or []}
-        return " | ".join(check_merge(data, candidates, 2, maximum).errors)
+        return " | ".join(check_merge(data, candidates, 2, maximum, lead_directed).errors)
 
     note = "pragmatist-1 gives the claim; innovator-1 gives the test"
     one = {
@@ -620,6 +625,11 @@ def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why(
     full = {**dup, "reason": "over_limit", "of": None}
     assert "there is room for innovator-2" in errors([one, rest[0]], [full])
     assert not errors([one, rest[0]], [full], maximum=2)
+    # the research lead's direction can leave a candidate out below the maximum, only when given
+    lead = {**dup, "reason": "lead_direction", "of": None, "text": "Research lead: narrow scope"}
+    assert not errors([one, rest[0]], [lead], lead_directed=True)
+    assert "no research-lead direction" in errors([one, rest[0]], [lead])
+    assert "say why in text" in errors([one, rest[0]], [{**lead, "text": ""}], lead_directed=True)
     assert "is used by the set" in errors([one, *rest], [{**dup, "candidate": "pragmatist-1"}])
     assert "say why in text" in errors([one, rest[0]], [{**dup, "text": ""}])
     # a duplicate repeats the claim of the hypothesis it names
