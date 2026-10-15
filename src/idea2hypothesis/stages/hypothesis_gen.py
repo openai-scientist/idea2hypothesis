@@ -206,10 +206,24 @@ LEAD_DIRECTION_PREFIXES = ("Research lead: Handoff:", "Feedback from a later sta
 #: The sign of a prediction follows the estimand's subtraction order, so a sign clash may be
 #: a wording difference only.
 _SIGN_ADVICE = (
-    "if the claims are the same and only the subtraction order differs, rewrite them in the "
-    "canonical orientation (exposure minus comparator) so the predictions match; if they truly "
-    "predict opposite effects, keep them separate"
+    "if the claims are the same and only the subtraction order differs (exposure and "
+    "comparator, or which subgroup is subtracted from which), write the hypothesis in the "
+    "canonical orientation (exposure minus comparator), list the reversed candidate in "
+    "'reoriented' and say in its text that its sign is flipped; if they truly predict opposite "
+    "effects, keep them separate"
 )
+_FLIP = {"< 0": "> 0", "> 0": "< 0"}
+
+
+def _reoriented(entry: dict[str, Any]) -> set[str]:
+    raw = entry.get("reoriented")
+    return {x for x in raw if isinstance(x, str)} if isinstance(raw, list) else set()
+
+
+def _oriented(candidate: Candidate, flipped: bool) -> Any:
+    """A candidate's predicted sign, flipped when the merge declares its subtraction reversed."""
+    sign = normalise_prediction(candidate.hypothesis.get("prediction"))
+    return _FLIP.get(sign, sign) if flipped else sign
 
 
 def _merge_problems(
@@ -219,7 +233,10 @@ def _merge_problems(
     if len(set(sources)) < 2:
         return []
     problems = []
-    signs = {normalise_prediction(candidates[x].hypothesis.get("prediction")) for x in sources}
+    flipped = _reoriented(h)
+    if stray := sorted(flipped - set(sources)):
+        problems.append(f"{tag}: reoriented {stray} must be candidates listed in from")
+    signs = {_oriented(candidates[x], x in flipped) for x in sources}
     # Candidates are checked lightly; compare only predictions written in a canonical form.
     if len(signs) > 1 and signs <= set(PREDICTIONS):
         problems.append(
@@ -276,9 +293,9 @@ def _not_used_problems(
         elif reason == "duplicate" and str(entry.get("of")) not in final:
             problems.append(f"{tag}: a duplicate names in 'of' the final hypothesis that already "
                             "makes its claim")  # fmt: skip
-        elif reason == "duplicate" and _predicts(candidates[c].hypothesis) != _predicts(
-            final[str(entry["of"])]
-        ):
+        elif reason == "duplicate" and _oriented(
+            candidates[c], c in _reoriented(entry) or entry.get("reoriented") is True
+        ) != _predicts(final[str(entry["of"])]):
             # Two negligible-effect claims that differ only in margin are one study: a duplicate.
             problems.append(
                 f"{tag}: {c} predicts {_predicts(candidates[c].hypothesis)} but {entry['of']} "
@@ -551,6 +568,7 @@ async def run(ctx: StageContext) -> list[str]:
     hypotheses = data["hypotheses"]
     for h in hypotheses:
         h["tension_ids"] = [t for t in h.get("tension_ids") or [] if t in valid_tensions]
+        h.pop("reoriented", None)  # a check aid; merge_note says which sign was flipped
         if len(set(h["from"])) < 2:
             h.pop("merge_note", None)  # only a hypothesis merged from several candidates has one
         if h["prediction"] != EQUIVALENCE:

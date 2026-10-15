@@ -443,7 +443,10 @@ stages:
       an effect, another says it is too small to matter, absent, or present only under a
       condition) are never merged into one: keep each as its own hypothesis, and when the limit
       leaves no room for both, say so in "disagreements". A hypothesis built from two or more
-      candidates says in "merge_note" what it takes from each, naming their ids. Conversely, two
+      candidates says in "merge_note" what it takes from each, naming their ids. When a
+      candidate states the same claim with the subtraction reversed (B minus A instead of A minus
+      B, so the opposite sign), list it in "reoriented" and say in "merge_note" that its sign is
+      flipped; a duplicate in "not_used" takes "reoriented": true for the same case. Conversely, two
       candidates with the same exposure, outcome, prediction and conditions make the same claim:
       merge them, or say in each "rationale" the testable difference that sets them apart; never
       keep two hypotheses whose tests would be the same study. Two "≈ 0" candidates that differ

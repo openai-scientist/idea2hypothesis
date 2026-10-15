@@ -651,6 +651,7 @@ def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why(
     sign_clash = errors([one, rest[0]], [{**dup, "of": "H2"}])
     assert "only the subtraction order differs" in sign_clash
     assert "canonical orientation (exposure minus comparator)" in sign_clash
+    assert "list the reversed candidate in 'reoriented'" in sign_clash
     assert "use it, or give over_limit" in sign_clash
 
 
@@ -923,3 +924,20 @@ def test_a_plain_rejection_still_asks_for_a_better_set():
     text = _rejection_feedback(spec, _FeedbackArtifacts(), "too vague")
     assert "write a better set, not the same one" in text
     assert "unchanged" not in text
+
+
+def test_a_merge_may_flip_a_candidate_whose_subtraction_is_reversed() -> None:
+    # Live: "supported minus unsupported < 0" and "unsupported minus supported > 0" are one claim.
+    candidates = {
+        "innovator-3": Candidate("innovator-3", "innovator", 3, {"prediction": "< 0"}),
+        "contrarian-3": Candidate("contrarian-3", "contrarian", 3, {"prediction": "> 0"}),
+    }
+    merged = {"id": "H1", "from": ["innovator-3", "contrarian-3"], "merge_note": "flipped"}
+    rest = {"id": "H2", "from": ["innovator-3"]}
+
+    def errors(**extra: object) -> list[str]:
+        return check_merge({"hypotheses": [merged | extra, rest]}, candidates, 2, 6).errors
+
+    assert any("predict different effects" in e for e in errors())
+    assert not any("predict different effects" in e for e in errors(reoriented=["contrarian-3"]))
+    assert any("must be candidates listed in from" in e for e in errors(reoriented=["other-1"]))
