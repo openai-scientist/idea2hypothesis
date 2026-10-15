@@ -21,6 +21,7 @@ def capabilities() -> Capabilities:
         stage_keys=["hypothesis"],
         output_schemas=[
             OutputDecl(schema="i2h.hypotheses/v1", primary=True),
+            OutputDecl(schema="i2h.evidence/v1"),
             OutputDecl(schema="review.findings/v1"),
             OutputDecl(schema="revision.response/v1"),
             OutputDecl(schema="revision.diff/v1"),
@@ -35,6 +36,7 @@ def capabilities() -> Capabilities:
         optional_integrations=["semantic_scholar", "openalex"],
         providers=["openai_compatible"],
         auto_revision=False,
+        reuses_prior_run=True,
         activity_types=list(ACTIVITY_TYPES),
         profiles=[ResearchProfile()],
     )
