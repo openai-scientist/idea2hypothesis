@@ -31,6 +31,7 @@ from idea2hypothesis.pipeline import gates
 from idea2hypothesis.pipeline.contracts import normalise_margin
 from idea2hypothesis.pipeline.events import Event
 from idea2hypothesis.pipeline.models import Stage
+from idea2hypothesis.storage import filecache
 from idea2hypothesis.storage.artifacts import ArtifactStore, write_bytes_atomic
 from idea2hypothesis.storage.runs import RunStore
 
@@ -2105,6 +2106,10 @@ def _on_stage_progress(view: RunView, event: Event) -> list[Envelope]:
     stage_run, try_index = int(data.get("stage_run", 0)), int(data.get("try", 0))
     if kind == "restart":
         return _on_restart(view, group, stage, stage_run, try_index)
+    if kind == "notice":  # a line the engine says about the run itself (for example, reuse)
+        message_id = f"notice-{event.seq}"
+        return [_message(message_id, str(data["text"]), stage_key=group.key,
+                         actor=group.cast[0], done=True)]  # fmt: skip
     step = _PROGRESS_STEP.get(kind)
     if step is None:
         return []
@@ -2570,7 +2575,7 @@ class PlatformEventLog:
     def _load(self, run_id: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         try:
-            lines = self.path(run_id).read_text(encoding="utf-8").splitlines()
+            lines = filecache.read_text(self.path(run_id)).splitlines()
         except OSError:
             return rows
         for line in lines:
@@ -2600,7 +2605,7 @@ class PlatformEventLog:
 
     def _file_ends_cleanly(self, run_id: str) -> bool:
         try:
-            data = self.path(run_id).read_bytes()
+            data = filecache.read_bytes(self.path(run_id))
         except OSError:
             return True
         return not data or data.endswith(b"\n")
@@ -2635,15 +2640,21 @@ class PlatformEventLog:
             if lines:
                 path = self.path(run_id)
                 prefix = b""
-                if path.exists() and path.stat().st_size > 0:
-                    with path.open("rb") as probe:
-                        probe.seek(-1, os.SEEK_END)
-                        if probe.read(1) != b"\n":
-                            prefix = b"\n"
+                before = filecache.signature(path)
+                if before is not None and before[0] > 0:
+                    last = filecache.last_byte(path)
+                    if last is None:
+                        with path.open("rb") as probe:
+                            probe.seek(-1, os.SEEK_END)
+                            last = probe.read(1)
+                    if last != b"\n":
+                        prefix = b"\n"
+                payload = prefix + "".join(lines).encode("utf-8")
                 with path.open("ab") as handle:
-                    handle.write(prefix + "".join(lines).encode("utf-8"))
+                    handle.write(payload)
                     handle.flush()
                     os.fsync(handle.fileno())
+                filecache.appended(path, before, payload)
                 st.last_seq = seq
                 st.last_core = core_seq
             st.memory_core = max(st.memory_core, core_seq)

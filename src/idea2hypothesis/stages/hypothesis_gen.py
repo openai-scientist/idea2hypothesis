@@ -20,10 +20,12 @@ from idea2hypothesis.literature.novelty import Judge, check_novelty
 from idea2hypothesis.pipeline.contracts import (
     EQUIVALENCE,
     FINDING_CATEGORIES,
+    FINDING_DUE,
     FINDING_KINDS,
     FINDING_SEVERITIES,
     MIN_HYPOTHESES,
     PREDICTIONS,
+    RESOLUTION_STATUSES,
     REVISION_OUTCOMES,
     Findings,
     check_hypotheses,
@@ -197,7 +199,33 @@ def _evidence_view(card: dict[str, Any]) -> dict[str, Any]:
 
 
 #: Why a candidate with no fatal objection standing is left out of the final set.
-NOT_USED_REASONS = ("duplicate", "over_limit")
+NOT_USED_REASONS = ("duplicate", "over_limit", "lead_direction")
+#: Run-constraint prefixes that carry the research lead's direction to this stage.
+#: The lead's framing lines ("Research lead: Research question: ...") are not direction.
+LEAD_DIRECTION_PREFIXES = ("Research lead: Handoff:", "Feedback from a later stage: ")
+
+
+#: The sign of a prediction follows the estimand's subtraction order, so a sign clash may be
+#: a wording difference only.
+_SIGN_ADVICE = (
+    "if the claims are the same and only the subtraction order differs (exposure and "
+    "comparator, or which subgroup is subtracted from which), write the hypothesis in the "
+    "canonical orientation (exposure minus comparator), list the reversed candidate in "
+    "'reoriented' and say in its text that its sign is flipped; if they truly predict opposite "
+    "effects, keep them separate"
+)
+_FLIP = {"< 0": "> 0", "> 0": "< 0"}
+
+
+def _reoriented(entry: dict[str, Any]) -> set[str]:
+    raw = entry.get("reoriented")
+    return {x for x in raw if isinstance(x, str)} if isinstance(raw, list) else set()
+
+
+def _oriented(candidate: Candidate, flipped: bool) -> Any:
+    """A candidate's predicted sign, flipped when the merge declares its subtraction reversed."""
+    sign = normalise_prediction(candidate.hypothesis.get("prediction"))
+    return _FLIP.get(sign, sign) if flipped else sign
 
 
 def _merge_problems(
@@ -207,12 +235,15 @@ def _merge_problems(
     if len(set(sources)) < 2:
         return []
     problems = []
-    signs = {normalise_prediction(candidates[x].hypothesis.get("prediction")) for x in sources}
+    flipped = _reoriented(h)
+    if stray := sorted(flipped - set(sources)):
+        problems.append(f"{tag}: reoriented {stray} must be candidates listed in from")
+    signs = {_oriented(candidates[x], x in flipped) for x in sources}
     # Candidates are checked lightly; compare only predictions written in a canonical form.
     if len(signs) > 1 and signs <= set(PREDICTIONS):
         problems.append(
             f"{tag}: merges candidates that predict different effects ({sorted(map(str, signs))});"
-            " keep them as separate hypotheses"
+            f" {_SIGN_ADVICE}"
         )
     # Negligible-effect candidates also claim a size: "within ± margin".
     margins = {
@@ -242,6 +273,7 @@ def _not_used_problems(
     unused: set[str],
     maximum: int,
     candidates: dict[str, Candidate],
+    lead_directed: bool = False,
 ) -> list[str]:
     """Every candidate without a fatal objection that the set leaves out says why."""
     raw = data.get("not_used") or []
@@ -263,18 +295,23 @@ def _not_used_problems(
         elif reason == "duplicate" and str(entry.get("of")) not in final:
             problems.append(f"{tag}: a duplicate names in 'of' the final hypothesis that already "
                             "makes its claim")  # fmt: skip
-        elif reason == "duplicate" and _predicts(candidates[c].hypothesis) != _predicts(
-            final[str(entry["of"])]
-        ):
+        elif reason == "duplicate" and _oriented(
+            candidates[c], c in _reoriented(entry) or entry.get("reoriented") is True
+        ) != _predicts(final[str(entry["of"])]):
             # Two negligible-effect claims that differ only in margin are one study: a duplicate.
             problems.append(
                 f"{tag}: {c} predicts {_predicts(candidates[c].hypothesis)} but {entry['of']} "
-                f"predicts {_predicts(final[str(entry['of'])])}; it is not a duplicate: use it, "
-                "or give over_limit when the set is full"
+                f"predicts {_predicts(final[str(entry['of'])])}; {_SIGN_ADVICE}; if they are "
+                "separate claims, use it, or give over_limit when the set is full"
             )
         elif reason == "over_limit" and len(items) < maximum:
             problems.append(f"{tag}: the set has {len(items)} of at most {maximum} hypotheses; "
                             f"there is room for {c}")  # fmt: skip
+        elif reason == "lead_direction" and not lead_directed:
+            problems.append(f"{tag}: this run has no research-lead direction (no "
+                            f"'Research lead: Handoff:' or 'Feedback from a later stage:' "
+                            f"constraint, no review comments); "
+                            f"use {c} or give duplicate or over_limit")  # fmt: skip
         if not _text(entry.get("text")):
             problems.append(f"{tag}: say why in text")
     missing = sorted(unused - seen)
@@ -289,7 +326,11 @@ def _text(value: Any) -> str:
 
 
 def check_merge(
-    data: Any, candidates: dict[str, Candidate], minimum: int, maximum: int
+    data: Any,
+    candidates: dict[str, Candidate],
+    minimum: int,
+    maximum: int,
+    lead_directed: bool = False,
 ) -> Findings:
     """The final set's size, its sources, the rule that a candidate with a fatal objection
     standing is used only when the set cannot be filled from cleared ones, merges that keep
@@ -331,7 +372,7 @@ def check_merge(
         )
     if f.ok:
         unused = {c.id for c in candidates.values() if not c.fatal and c.id not in used}
-        for problem in _not_used_problems(data, items, unused, maximum, candidates):
+        for problem in _not_used_problems(data, items, unused, maximum, candidates, lead_directed):
             f.error(problem)
     return f
 
@@ -364,6 +405,33 @@ def _held_back(hypotheses: list[dict[str, Any]], candidates: dict[str, Candidate
         }
         for c in candidates.values()
         if c.fatal and c.id not in used
+    ]
+
+
+def drop_redundant_not_used(data: Any, candidates: dict[str, Candidate]) -> None:
+    """Drop not_used entries for candidates the set uses or a fatal objection holds back: code
+    already records both, so a repair round for them is wasted (live: 9 of 23 rejected merges)."""
+    items = data.get("hypotheses") if isinstance(data, dict) else None
+    raw = data.get("not_used") if isinstance(data, dict) else None
+    if not (isinstance(items, list) and isinstance(raw, list)):
+        return
+    used = {
+        x
+        for h in items
+        if isinstance(h, dict) and isinstance(h.get("from"), list)
+        for x in h["from"]
+        if isinstance(x, str)
+    }
+    accounted = used | {c.id for c in candidates.values() if c.fatal}
+    # A malformed entry (e.g. a list of ids) stays for check_merge to report.
+    data["not_used"] = [
+        e
+        for e in raw
+        if not (
+            isinstance(e, dict)
+            and isinstance(e.get("candidate"), str)
+            and e["candidate"] in accounted
+        )
     ]
 
 
@@ -506,12 +574,26 @@ async def run(ctx: StageContext) -> list[str]:
         re.findall(r"^- finding (\S+) at ", ctx.feedback, re.MULTILINE) if ctx.review_phase else []
     )
 
+    lead_directed = bool(owed) or any(
+        c.startswith(LEAD_DIRECTION_PREFIXES) for c in ctx.constraints
+    )
+
+    prior = _prior_statements(ctx)
+    named = _named_ids(ctx, prior)
+
     def validate(data: dict[str, Any]) -> Findings:
         normalise_hypotheses(data)
+        drop_redundant_not_used(data, candidates)
         f = check_hypotheses(data, valid_gaps, valid_refs, valid_tensions)
-        f.extend(check_merge(data, candidates, research.min_hypotheses, research.max_hypotheses))
+        f.extend(
+            check_merge(
+                data, candidates, research.min_hypotheses, research.max_hypotheses, lead_directed
+            )
+        )
         if owed:
             f.extend(_check_revision_responses(data, owed))
+        if prior:
+            f.extend(_check_ids_bound(data, prior, named))
         return f
 
     await ctx.progress("merge", perspectives=sorted(debate.positions))
@@ -519,6 +601,7 @@ async def run(ctx: StageContext) -> list[str]:
     hypotheses = data["hypotheses"]
     for h in hypotheses:
         h["tension_ids"] = [t for t in h.get("tension_ids") or [] if t in valid_tensions]
+        h.pop("reoriented", None)  # a check aid; merge_note says which sign was flipped
         if len(set(h["from"])) < 2:
             h.pop("merge_note", None)  # only a hypothesis merged from several candidates has one
         if h["prediction"] != EQUIVALENCE:
@@ -596,6 +679,67 @@ async def run(ctx: StageContext) -> list[str]:
     return [*warnings, *soft]
 
 
+#: Said in the feedback of every attempt that revises a previous set (``pipeline.reuse``, the
+#: rejection feedback of the runner); the previous set is then bound to its ids.
+_KEEP_MARK = "same id, same statement"
+
+
+def _prior_statements(ctx: StageContext) -> dict[str, str]:
+    """Id -> statement of the set this attempt revises; empty when it revises none."""
+    if _KEEP_MARK not in ctx.feedback:
+        return {}
+    if ctx.attempt < 2:
+        doc = ctx.artifacts.read_run_json(PREVIOUS_ROUND)
+    else:
+        doc = ctx.artifacts.read_archived_json(ctx.attempt - 1, STAGE, "hypotheses.json")
+    items = doc.get("hypotheses") if isinstance(doc, dict) else None
+    if not isinstance(items, list):
+        return {}
+    return {
+        str(h["id"]): _plain(h.get("statement")) for h in items if isinstance(h, dict) and "id" in h
+    }
+
+
+def _plain(text: Any) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip().removesuffix(".").strip()
+
+
+def _named_ids(ctx: StageContext, prior: dict[str, str]) -> set[str]:
+    """Prior ids the research lead's lines of this attempt name as a whole token. Every
+    "Research lead:" line counts (directive, handoff, known risk), except the charter framing."""
+    from idea2hypothesis.pipeline.reuse import CHARTER_PREFIXES  # reuse imports this module
+
+    lines = [
+        c
+        for c in ctx.constraints
+        if (c.startswith("Research lead: ") and not c.startswith(CHARTER_PREFIXES))
+        or c.startswith(LEAD_DIRECTION_PREFIXES)
+    ] + ctx.feedback.splitlines()
+    # The "Previous hypotheses: ..." list lists every id; it names none.
+    text = "\n".join(re.sub(r"Previous hypotheses.*", "", line) for line in lines)
+    return {i for i in prior if re.search(rf"\b{re.escape(i)}\b", text)}
+
+
+def _check_ids_bound(data: dict[str, Any], prior: dict[str, str], named: set[str]) -> Findings:
+    """A revision keeps each previous id bound to its claim (the Platform selects by id)."""
+    f = Findings()
+    new = {
+        str(h["id"]): _plain(h.get("statement"))
+        for h in data.get("hypotheses") or []
+        if isinstance(h, dict) and "id" in h
+    }
+    for pid, statement in prior.items():
+        if pid not in new:
+            f.error(f"hypothesis {pid} is missing: a revision keeps every previous id")
+        elif pid not in named and new[pid] != statement:
+            f.error(
+                f"hypothesis {pid} has a different statement: a hypothesis the research lead's "
+                f"lines do not name keeps its id and its exact statement ({statement!r}); give a "
+                "new hypothesis an id that no previous hypothesis used"
+            )
+    return f
+
+
 def _check_revision_responses(data: dict[str, Any], owed: list[str]) -> Findings:
     f = Findings()
     items = data.get("revision_responses")
@@ -606,13 +750,85 @@ def _check_revision_responses(data: dict[str, Any], owed: list[str]) -> Findings
         if not isinstance(item, dict) or item.get("outcome") not in REVISION_OUTCOMES:
             f.error(f"each revision response needs an outcome from {list(REVISION_OUTCOMES)}")
             continue
+        note = item.get("note")
+        if item["outcome"] != "fixed" and not (isinstance(note, str) and note.strip()):
+            f.error(f"revision response for {item.get('finding_id')} needs a note: say why")
         answered.add(str(item.get("finding_id")))
     missing = [i for i in owed if i not in answered]
     f.require(not missing, f"revision_responses does not answer findings: {', '.join(missing)}")
     return f
 
 
-def _check_review(data: Any, ids: set[str]) -> Findings:
+#: Prefixes the code puts on findings it downgrades, so the researcher and later stages see why.
+LATER_PREFIX = "[for experiment design] "
+LATER_CATEGORIES = ("reproducibility", "statistics", "other")
+UNCHANGED_PREFIX = "[unchanged] "
+#: Run file where ``pipeline.reuse.adopt`` keeps the earlier run's final set and review.
+PREVIOUS_ROUND = "reused_previous_round.json"
+#: Hypothesis fields whose change counts as a revision (derived fields such as caveats do not).
+CONTENT_FIELDS = (
+    "statement", "gap_id", "evidence_refs", "exposure", "outcome", "estimand", "method",
+    "conditions", "prediction", "equivalence_margin", "falsification_criteria", "rationale",
+    "novelty", "risk", "tension_ids",
+)  # fmt: skip
+FINDING_FIELDS = ("hypothesis_id", "field", "severity", "category", "kind", "issue", "suggestion")
+
+
+def changed_hypotheses(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> set[str]:
+    """Ids of the hypotheses of ``after`` that are new or differ in content from ``before``."""
+    old = {str(h["id"]): h for h in before}
+    return {
+        str(h["id"])
+        for h in after
+        if str(h["id"]) not in old
+        or any(h.get(k) != old[str(h["id"])].get(k) for k in CONTENT_FIELDS)
+    }
+
+
+def _previous_round(
+    ctx: StageContext, hypotheses: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], set[str]] | None:
+    """The previous round's findings (with their wire ids) and the hypotheses the revision
+    changed; ``None`` in the first round of a run that reuses no earlier run."""
+    if ctx.attempt < 2:
+        # A reused run's first round follows the earlier run's final review (see ``reuse.adopt``).
+        reused = ctx.artifacts.read_run_json(PREVIOUS_ROUND)
+        if not isinstance(reused, dict) or not isinstance(reused.get("review"), dict):
+            return None
+        # "P" ids: this run's own round 1 also numbers its findings F1-n.
+        return _round_view(reused["review"], 1, reused.get("hypotheses"), hypotheses, prefix="P")
+    archived = ctx.artifacts.read_archived_json(ctx.attempt - 1, STAGE, "hypotheses.json")
+    if not isinstance(archived, dict):
+        return None
+    review = ctx.artifacts.read_archived_json(ctx.attempt - 1, STAGE, "review.json")
+    return _round_view(review, ctx.attempt - 1, archived.get("hypotheses"), hypotheses)
+
+
+def _round_view(
+    review: Any,
+    default_round: int,
+    before: Any,
+    hypotheses: list[dict[str, Any]],
+    *,
+    prefix: str = "F",
+) -> tuple[list[dict[str, Any]], set[str]] | None:
+    if not isinstance(before, list):
+        return None
+    # A review that failed judged nothing: no hypothesis counts as reviewed, none as unchanged.
+    if not isinstance(review, dict) or review.get("error"):
+        return None
+    round_ = review.get("round", default_round)
+    findings = [
+        {"id": f"{prefix}{round_}-{n}", **{k: f.get(k) for k in FINDING_FIELDS}}
+        for n, f in enumerate(review.get("findings") or [], 1)
+    ]
+    return findings, changed_hypotheses(before, hypotheses)
+
+
+def _check_review(
+    data: Any, ids: set[str], owed: dict[str, dict[str, Any]] | None = None
+) -> Findings:
+    """``owed`` holds the blocking findings of the previous round, each needing a resolution."""
     f = Findings()
     items = data.get("findings") if isinstance(data, dict) else None
     if not f.require(isinstance(items, list), "the answer needs a 'findings' list"):
@@ -627,11 +843,71 @@ def _check_review(data: Any, ids: set[str]) -> Findings:
         f.require(item.get("severity") in FINDING_SEVERITIES, f"finding {n}: bad severity")
         f.require(item.get("category") in FINDING_CATEGORIES, f"finding {n}: bad category")
         f.require(item.get("kind") in FINDING_KINDS, f"finding {n}: bad kind")
+        f.require(
+            item.get("due", "now") in FINDING_DUE,
+            f"finding {n}: 'due' must be one of {list(FINDING_DUE)}",
+        )
+    if owed:
+        f.extend(_check_resolutions(data, owed, ids))
     return f
+
+
+def _check_resolutions(
+    data: dict[str, Any], owed: dict[str, dict[str, Any]], ids: set[str]
+) -> Findings:
+    f = Findings()
+    items = data.get("resolutions")
+    if not f.require(isinstance(items, list), "the answer needs a 'resolutions' list"):
+        return f
+    answered: set[str] = set()
+    for item in items:
+        fid = str(item.get("finding_id")) if isinstance(item, dict) else ""
+        if fid not in owed:
+            f.error(f"resolution for {fid!r}: not a blocking finding of the previous round")
+        elif fid in answered:
+            f.error(f"resolution for {fid}: answered twice; give one status")
+        elif item.get("status") not in RESOLUTION_STATUSES:
+            f.error(f"resolution for {fid}: status must be one of {list(RESOLUTION_STATUSES)}")
+        elif not _text(item.get("reason")):
+            f.error(f"resolution for {fid}: 'reason' is missing")
+        elif item["status"] == "maintained" and str(owed[fid]["hypothesis_id"]) not in ids:
+            f.error(f"resolution for {fid}: its hypothesis is no longer in the set; it is resolved")
+        else:
+            answered.add(fid)
+    missing = [i for i in owed if i not in answered]
+    f.require(not missing, f"resolutions do not answer the findings: {', '.join(missing)}")
+    return f
+
+
+def _earlier_findings(
+    resolutions: list[dict[str, Any]], owed: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """A previous blocking finding the reviewer maintains stays blocking in this round."""
+    return [
+        {
+            **{k: owed[r["finding_id"]][k] for k in FINDING_FIELDS},
+            "severity": "blocking",
+            "issue": f"[maintains {r['finding_id']}] {_text(r['reason'])}",
+        }
+        for r in resolutions
+        if r["status"] == "maintained"
+    ]
+
+
+def _keep_unchanged(finding: dict[str, Any], unchanged: set[str]) -> None:
+    """A new blocking finding on a hypothesis the revision did not change is only major."""
+    if finding["severity"] == "blocking" and finding["hypothesis_id"] in unchanged:
+        finding["severity"] = "major"
+        finding["issue"] = UNCHANGED_PREFIX + str(finding["issue"])
 
 
 async def review(ctx: StageContext) -> dict[str, Any]:
     """One call of the review model on the final set; writes ``review.json`` and returns it.
+
+    After a revision (a Platform comment) the review converges: the previous round's blocking
+    findings are answered with a resolution, and a new blocking finding on a hypothesis the
+    revision did not change is only major. A finding due later (protocol details that
+    experiment design fixes) is minor.
 
     When the reviewer cannot give a valid answer, ``review.json`` records the error and the
     researcher decides (the gate opens with the error); nothing is invented in its place.
@@ -642,6 +918,9 @@ async def review(ctx: StageContext) -> dict[str, Any]:
         await ctx.on_phase("reviewing")
     doc = ctx.artifacts.read_json(STAGE, "hypotheses.json")
     ids = {str(h["id"]) for h in doc["hypotheses"]}
+    previous = _previous_round(ctx, doc["hypotheses"])
+    owed = {f["id"]: f for f in previous[0] if f["severity"] == "blocking"} if previous else {}
+    unchanged = ids - previous[1] if previous else set()
     novelty = (
         ctx.artifacts.read_json(STAGE, "novelty_report.json")
         if ctx.artifacts.exists(STAGE, "novelty_report.json")
@@ -650,6 +929,15 @@ async def review(ctx: StageContext) -> dict[str, Any]:
     view = {k: doc.get(k) for k in (
         "hypotheses", "held_back", "not_used", "open_tensions", "disagreements"
     )}  # fmt: skip
+    previous_view = (
+        {
+            "findings": previous[0],
+            "changed_hypotheses": sorted(previous[1]),
+            "unchanged_hypotheses": sorted(unchanged),
+        }
+        if previous
+        else None
+    )
     prompt = ctx.prompts.render(
         "hypothesis_review",
         topic=ctx.topic,
@@ -658,6 +946,7 @@ async def review(ctx: StageContext) -> dict[str, Any]:
         novelty_json=compact_json(novelty) if novelty else "none",
         cards_json=compact_json([_evidence_view(c) for c in load_cards(ctx)]),
         categories=", ".join(FINDING_CATEGORIES),
+        previous_json=compact_json(previous_view) if previous_view else "none",
     )
     reviewer_cfg = ctx.config.llm.reviewer
     result: dict[str, Any] = {
@@ -668,14 +957,26 @@ async def review(ctx: StageContext) -> dict[str, Any]:
     try:
         data, _ = await request_json(
             ctx, prompt, label="hypothesis review", llm=ctx.reviewer,
-            validate=lambda d: _check_review(d, ids),
+            validate=lambda d: _check_review(d, ids, owed),
         )  # fmt: skip
-        result["findings"] = [
-            {k: item.get(k) for k in (
-                "hypothesis_id", "field", "severity", "category", "kind", "issue", "suggestion"
-            )}
-            for item in data["findings"]
-        ]  # fmt: skip
+        for item in data["findings"]:
+            finding = {k: item.get(k) for k in FINDING_FIELDS}
+            # Only protocol details wait for experiment design; missing evidence and design
+            # flaws (leakage, baseline, control) cannot.
+            if (
+                item.get("due", "now") == "later"
+                and finding["kind"] != "needs_evidence"
+                and finding["category"] in LATER_CATEGORIES
+            ):
+                finding["severity"] = "minor"
+                finding["issue"] = LATER_PREFIX + str(finding["issue"])
+            _keep_unchanged(finding, unchanged)
+            result["findings"].append(finding)
+        if owed:
+            result["resolutions"] = [
+                {k: r[k] for k in ("finding_id", "status", "reason")} for r in data["resolutions"]
+            ]
+            result["findings"] += _earlier_findings(result["resolutions"], owed)
     except StageFailure as exc:
         if exc.code != "LLM_OUTPUT_INVALID":
             raise
@@ -685,11 +986,12 @@ async def review(ctx: StageContext) -> dict[str, Any]:
     for h in doc["hypotheses"]:
         if h.get("contested") and str(h["id"]) not in blocked:
             standing = "; ".join(f"{o['from']}: {o['text']}" for o in h["contested"])
-            result["findings"].append({
+            finding = {
                 "hypothesis_id": str(h["id"]), "field": "statement", "severity": "blocking",
                 "category": "evidence", "kind": "needs_evidence", "issue": standing,
                 "suggestion": None,
-            })  # fmt: skip
+            }  # fmt: skip
+            result["findings"].append(finding)
     result["passed"] = "error" not in result and not any(
         f["severity"] == "blocking" for f in result["findings"]
     )

@@ -23,6 +23,7 @@ from idea2hypothesis.storage.runs import RunStore
 logger = logging.getLogger(__name__)
 
 I2H_HYPOTHESES = "i2h.hypotheses/v1"
+I2H_EVIDENCE = "i2h.evidence/v1"
 REVIEW_FINDINGS = "review.findings/v1"
 ARGUMENT_MAP = "i2h.argument_map/v1"
 REVISION_RESPONSE = "revision.response/v1"
@@ -73,6 +74,33 @@ def _code(response: httpx.Response) -> str:
 
 def _json_bytes(doc: Any) -> bytes:
     return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+EVIDENCE_CARD_FIELDS = (
+    "card_id", "paper_id", "title", "year", "venue", "doi", "url",
+    "data", "metrics", "findings", "limitations",
+)  # fmt: skip
+
+
+def evidence_document(
+    hypotheses: list[dict[str, Any]], cards: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The knowledge cards the published hypotheses cite, each with the hypotheses citing it."""
+    by_id = {str(c["card_id"]): c for c in cards if c.get("card_id")}
+    cited: dict[str, list[str]] = {}
+    for h in hypotheses:
+        for ref in h.get("evidence_refs") or []:
+            ids = cited.setdefault(str(ref), [])
+            if str(h["id"]) not in ids:
+                ids.append(str(h["id"]))
+    return {
+        "schema_version": I2H_EVIDENCE,
+        "cards": [
+            {**{k: by_id[ref].get(k) for k in EVIDENCE_CARD_FIELDS}, "hypothesis_ids": ids}
+            for ref, ids in cited.items()
+            if ref in by_id
+        ],
+    }
 
 
 class ArtifactPublisher:
@@ -157,11 +185,26 @@ class ArtifactPublisher:
     # -- documents ------------------------------------------------------------
 
     async def push_hypotheses(self, run_id: str) -> str:
-        doc = self.store.artifacts(run_id).read_json(8, "hypotheses.json")
-        return await self.ensure_pushed(
+        """The hypotheses, then the evidence cards they cite (a non-primary artifact)."""
+        art = self.store.artifacts(run_id)
+        doc = art.read_json(8, "hypotheses.json")
+        artifact_id = await self.ensure_pushed(
             run_id, I2H_HYPOTHESES, _json_bytes({"schema": I2H_HYPOTHESES, **doc}),
             filename="hypotheses.json", primary=True,
         )  # fmt: skip
+        try:
+            cards = [
+                art.read_json(6, name)
+                for name in art.list_files(6)
+                if name.startswith("cards/") and name.endswith(".json")
+            ]
+            await self.ensure_pushed(
+                run_id, I2H_EVIDENCE, _json_bytes(evidence_document(doc["hypotheses"], cards)),
+                filename="evidence.json",
+            )
+        except Exception:  # noqa: BLE001 - the evidence is optional; the hypotheses are delivered
+            logger.exception("run %s: the evidence artifact was not delivered", run_id)
+        return artifact_id
 
     async def push_review(self, run_id: str) -> dict[str, str]:
         """Hypotheses first (the findings name them), then the findings of the review.

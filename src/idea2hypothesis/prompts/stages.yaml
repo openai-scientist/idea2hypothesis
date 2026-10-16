@@ -35,10 +35,10 @@ blocks:
       "evidence_refs": ["card or paper ids copied from the synthesis/cards, at least one"],
       "exposure": "intervention, manipulated variable or condition",
       "outcome": "measurable outcome with metric and unit",
-      "estimand": "the statistical or physical quantity to be estimated",
+      "estimand": "the quantity to be estimated, always written as exposure condition minus comparator condition (treated minus control, with minus without)",
       "method": "how the claim would be tested",
       "conditions": "population or regime where the claim applies",
-      "prediction": "> 0   or   < 0   or   != 0   or   ≈ 0   (the expected effect: positive, negative, non-zero in either direction, or negligible)",
+      "prediction": "> 0   or   < 0   or   != 0   or   ≈ 0   (the sign of the estimand, exposure minus comparator, on the outcome as defined: 'retrieval reduces error rate' is '< 0'; or non-zero in either direction, or negligible)",
       "equivalence_margin": 0.1,   (only for ≈ 0: a bare JSON number in the outcome's unit, no text or unit; effects within ± it count as negligible; null for the other predictions)
       "falsification_criteria": "the specific observation that would prove the claim WRONG, with a threshold or interval, not 'results differ from expectations'",
       "limitations": ["known boundary conditions or weaknesses"],
@@ -299,6 +299,9 @@ stages:
          be real scholarly work). citation_count null means the source does not count citations
          (arXiv records): it says nothing about the paper. Few or no citations count against a
          paper only when it is several years old; recent work has had no time to be cited.
+      6. METADATA MISMATCH: sources sometimes attach another paper's abstract to a record. When the
+         abstract clearly describes a different study than the title, judge the paper by its title
+         and venue only, and start "reason" with "abstract mismatch:".
 
       SCORES are separate from the decision. Score each paper on the anchors below first, then
       decide with the rules above. A paper that uses the topic's own terms for a problem in another
@@ -318,7 +321,8 @@ stages:
         0.00-0.44 no abstract, no venue, or not clearly scholarly work.
       Write scores with two decimals (for example 0.83 or 0.71) and place each paper within its
       band; do not round to steps of 0.05 or 0.1. "decision" is "keep" or "reject". Give a
-      one-sentence "reason" for every paper (do not start it with "Kept because").
+      one-sentence "reason" for every kept paper (do not start it with "Kept because"). For a
+      rejected paper the "reason" is at most 12 words.
 
       {{> json_rules}}
       Schema:
@@ -442,7 +446,10 @@ stages:
       an effect, another says it is too small to matter, absent, or present only under a
       condition) are never merged into one: keep each as its own hypothesis, and when the limit
       leaves no room for both, say so in "disagreements". A hypothesis built from two or more
-      candidates says in "merge_note" what it takes from each, naming their ids. Conversely, two
+      candidates says in "merge_note" what it takes from each, naming their ids. When a
+      candidate states the same claim with the subtraction reversed (B minus A instead of A minus
+      B, so the opposite sign), list it in "reoriented" and say in "merge_note" that its sign is
+      flipped; a duplicate in "not_used" takes "reoriented": true for the same case. Conversely, two
       candidates with the same exposure, outcome, prediction and conditions make the same claim:
       merge them, or say in each "rationale" the testable difference that sets them apart; never
       keep two hypotheses whose tests would be the same study. Two "≈ 0" candidates that differ
@@ -453,7 +460,9 @@ stages:
       LEFT OUT: every CLEARED or CAVEATS candidate the set does not use goes in "not_used" with
       its "reason": "duplicate" (a final hypothesis with the same prediction already tests its
       claim; give that hypothesis's id in "of"; for "≈ 0" with another margin, name both margins
-      in "text") or "over_limit" (the set already has {{max_hypotheses}} hypotheses); "text"
+      in "text"), "over_limit" (the set already has {{max_hypotheses}} hypotheses) or
+      "lead_direction" (a "Research lead: Handoff:" or "Feedback from a later stage:" constraint, or a
+      review comment, excludes the claim; name that direction in "text"); "text"
       says in one sentence why it is left out rather than another. When the limit forces you to
       leave candidates out, leave out first those whose claim another final hypothesis already
       contains (a part of a broader claim in the set), before any candidate that makes a claim no
@@ -477,6 +486,9 @@ stages:
       cannot be tested under the stated constraints.
 
       {{> hypothesis_schema}}
+      In this final set every hypothesis object also has two more fields after "tension_ids":
+        "from": ["innovator-1", "pragmatist-2"]   (the candidate ids it is built from; never empty)
+        "merge_note": "innovator-1 gives ...; pragmatist-2 gives ..."
 
       Synthesis:
       {{synthesis_json}}
@@ -488,6 +500,7 @@ stages:
       {{> json_rules}}
       Return {"hypotheses": [ {... every schema field ..., "from": ["innovator-1", "pragmatist-2"], "merge_note": "innovator-1 gives ...; pragmatist-2 gives ..."} ], "not_used": [{"candidate": "contrarian-3", "reason": "duplicate", "of": "H2", "text": "..."}], "disagreements": ["unresolved disagreement between perspectives", ...]}
       Only when the feedback above lists reviewer findings (lines starting "- finding"), also return "revision_responses": [{"finding_id": "...", "outcome": "fixed|rebutted|not_fixed", "note": "..."}] with one entry for each finding.
+      When the feedback above lists previous hypotheses, a hypothesis that no "Research lead:" line (other than its Research question, Topic, Success criterion and Objective lines), no "Feedback from a later stage:" line and no finding names keeps its id and its exact statement; a hypothesis they name keeps its id (its statement may change); every new hypothesis gets an id that no previous hypothesis used.
 
   argument_map:
     json_mode: true
@@ -757,6 +770,19 @@ sub_prompts:
       set below; "field" names the field of the hypothesis the finding is about (for example
       "statement", "prediction", "falsification_criteria"). Return no finding for a hypothesis
       without a problem.
+      Due: "now" (the hypothesis must change before it goes on) or "later". Protocol details
+      that experiment design fixes are "later": exact model or tool versions, seeds, replication
+      counts, sample sizes, compute or energy caps, dataset revisions or hashes, exact fault
+      lists. Give them as findings only when they matter, and always as "later", with category
+      "reproducibility", "statistics" or "other". A leakage, baseline or control flaw is "now".
+      Previous round: when the section below is not "none", this set is a revision after the
+      researcher's comments. Do not move the target. For every previous finding with severity
+      "blocking", return a resolution in "resolutions": {"finding_id": the previous id,
+      "status": "resolved" or "maintained", "reason": "..."}. Use "resolved" when the revision
+      fixed it or you now find it unfounded; use "maintained" only when the problem still
+      stands as written. Raise a new "blocking" finding only on a hypothesis the revision
+      changed (listed in "changed_hypotheses"); a hypothesis in "unchanged_hypotheses" has been
+      reviewed already, so a new problem there is at most "major".
 
       Topic: {{topic}}
       Goal:
@@ -772,7 +798,11 @@ sub_prompts:
       Evidence cards:
       {{cards_json}}
 
+      Previous round:
+      {{previous_json}}
+
       Allowed categories: {{categories}}
 
       {{> json_rules}}
-      Return {"findings": [{"hypothesis_id": "H1", "field": "prediction", "severity": "major", "category": "baseline", "kind": "fix", "issue": "...", "suggestion": "..."}]}
+      Return {"findings": [{"hypothesis_id": "H1", "field": "prediction", "severity": "major", "category": "baseline", "kind": "fix", "due": "now", "issue": "...", "suggestion": "..."}], "resolutions": [{"finding_id": "F1-2", "status": "resolved", "reason": "..."}]}
+      "resolutions" is [] when the previous round is "none".

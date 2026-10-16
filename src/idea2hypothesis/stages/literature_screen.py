@@ -21,6 +21,9 @@ MAX_ABSTRACT_CHARS = 5000
 MAX_BATCH_CHARS = 80_000
 MAX_BATCH_PAPERS = 40
 MAX_MISSING_FRACTION = 0.2
+MIN_KEYWORDS_FOR_STRICT = 3
+#: The stricter keyword rule must leave this many papers per shortlist slot, else it is relaxed.
+STRICT_PREFILTER_FLOOR = 3
 SCREEN_RULES = [
     "Domain match",
     "Method relevance",
@@ -44,11 +47,21 @@ def has_abstract(row: dict[str, Any]) -> bool:
     return bool(str(row.get("abstract") or "").strip())
 
 
+def keyword_overlap(blob: str, keywords: list[str]) -> int:
+    """How many keywords occur in ``blob`` as whole words, plural allowed ("ml" does not match
+    "html"; "benchmark" matches "benchmarks")."""
+    return sum(1 for kw in keywords if re.search(rf"(?<!\w){re.escape(kw)}(?:s|es)?(?!\w)", blob))
+
+
 def prefilter(
-    candidates: list[dict[str, Any]], keywords: list[str]
+    candidates: list[dict[str, Any]], keywords: list[str], min_overlap: int | None = None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split into ``(to_screen, prefiltered)``: papers without an abstract, and papers sharing no
-    keyword with the topic and domains, are not sent to the reviewer."""
+    """Split into ``(to_screen, prefiltered)``: papers without an abstract, and papers sharing too
+    few keywords with the topic and domains, are not sent to the reviewer.
+
+    ``min_overlap`` defaults to 2 when there are at least 3 keywords, else 1."""
+    if min_overlap is None:
+        min_overlap = 2 if len(keywords) >= MIN_KEYWORDS_FOR_STRICT else 1
     to_screen: list[tuple[int, dict[str, Any]]] = []
     dropped: list[dict[str, Any]] = []
     for row in candidates:
@@ -56,13 +69,29 @@ def prefilter(
             dropped.append(row)
             continue
         blob = f"{row.get('title', '')} {row.get('abstract', '')}".lower()
-        overlap = sum(1 for kw in keywords if kw in blob)
-        if overlap >= 1:
+        overlap = keyword_overlap(blob, keywords)
+        if overlap >= min_overlap:
             to_screen.append((overlap, row))
         else:
             dropped.append(row)
     to_screen.sort(key=lambda item: item[0], reverse=True)
     return [r for _, r in to_screen], dropped
+
+
+def select_for_screening(
+    candidates: list[dict[str, Any]], keywords: list[str], shortlist_cap: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """The pre-filter with its safety floor: when the stricter rule leaves fewer than
+    ``STRICT_PREFILTER_FLOOR`` papers per shortlist slot, one match is enough for this run."""
+    to_screen, dropped = prefilter(candidates, keywords)
+    floor = STRICT_PREFILTER_FLOOR * shortlist_cap
+    if len(keywords) >= MIN_KEYWORDS_FOR_STRICT and len(to_screen) < floor:
+        to_screen, dropped = prefilter(candidates, keywords, min_overlap=1)
+        return to_screen, dropped, [
+            f"the keyword pre-filter needing 2 matches left fewer than {floor} papers; "
+            "relaxed to 1 match"
+        ]  # fmt: skip
+    return to_screen, dropped, []
 
 
 def make_batches(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -243,7 +272,9 @@ async def run(ctx: StageContext) -> list[str]:
     candidates = ctx.artifacts.read_jsonl(4, "candidates.jsonl")
     research = ctx.config.research
     keywords = topic_keywords(ctx.topic, ctx.domains)
-    to_screen, dropped = prefilter(candidates, keywords)
+    to_screen, dropped, warnings = select_for_screening(
+        candidates, keywords, research.max_shortlist
+    )
     bypassed = False
     if not to_screen:  # nothing overlaps: let the reviewer model judge every paper it can read
         to_screen = [r for r in candidates if has_abstract(r)]
@@ -356,13 +387,37 @@ async def run(ctx: StageContext) -> list[str]:
         },
     )
     if not shortlist:
+        if down := _sources_down(ctx):
+            # Live: OpenAlex hit its daily limit and only off-topic arXiv papers came back. A new
+            # search strategy cannot help; the source has to come back.
+            raise StageFailure(
+                "SOURCES_UNAVAILABLE",
+                f"screening kept 0 of {len(candidates)} papers, and these sources returned "
+                f"nothing: {'; '.join(down)}. Retry when they are back; changing the search "
+                "strategy will not help",
+            )
         raise StageFailure(
             "EMPTY_SHORTLIST",
             f"screening kept 0 of {len(candidates)} papers; refine the search strategy",
         )
-    warnings = []
     if counts["unscored"]:
         warnings.append(
             f"{counts['unscored']} papers were not scored by the reviewer and were excluded"
         )
     return warnings
+
+
+def _sources_down(ctx: StageContext) -> list[str]:
+    """Sources of the collected literature that failed every request, with their first error."""
+    try:
+        per_source = ctx.artifacts.read_json(STAGE - 1, "search_meta.json").get("per_source") or {}
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [
+        f"{name} ({stats['errors'][0]})"
+        for name, stats in sorted(per_source.items())
+        if isinstance(stats, dict)
+        and not stats.get("papers")
+        and stats.get("errors")
+        and len(stats["errors"]) >= stats.get("requests", 0)
+    ]

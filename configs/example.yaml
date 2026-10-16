@@ -49,7 +49,7 @@ literature:
 
 prompts:
   override_file: ""
-  domain: ml                     # ml | hep | biology
+  domain: ml                     # ml | hep | biology | se
 
 runtime:
   max_retries: 1                 # bounded stage retries on transient provider errors

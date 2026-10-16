@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from idea2hypothesis.prompts import DOMAINS, PromptError, PromptLoader
+from idea2hypothesis.prompts.loader import run_domain
 
 STAGE_VARIABLES = {
     "topic_init": dict(topic="t", domains="d", constraints="c", memory_context="", feedback=""),
@@ -43,6 +44,10 @@ STAGE_VARIABLES = {
     ),
     "debate_review": dict(role="r", answered="a", added="n", valid_refs="r", synthesis_json="{}"),
     "debate_judge": dict(perspectives="p"),
+    "hypothesis_review": dict(
+        topic="t", goal_json="{}", hypotheses_json="{}", novelty_json="none", cards_json="[]",
+        categories="c", previous_json="none",
+    ),
 }
 ROLE_VARIABLES = dict(
     topic="t", constraints="c", feedback="", synthesis_json="{}", valid_refs="r", valid_gaps="g"
@@ -112,11 +117,13 @@ def test_reliability_rules_are_in_the_prompts() -> None:
     assert "researchable" in topic.user and "Wi-Fi" in topic.system  # out-of-scope guard
     screen = loader.render("literature_screen", **STAGE_VARIABLES["literature_screen"])
     assert "false_friend" in screen.user
+    assert "at most 12 words" in screen.user
     assert "staleness" in screen.system  # polysemy example
     hyp = loader.render("hypothesis_gen", **STAGE_VARIABLES["hypothesis_gen"])
     for needle in ("FALSIFIABLE", "EVIDENCE-LED DIRECTION", "DISTINCT MECHANISMS", "TRACEABLE"):
         assert needle in hyp.user
     assert "falsification_criteria" in hyp.user and "estimand" in hyp.user
+    assert '"from": ["innovator-1"' in hyp.user and "never empty" in hyp.user
     # The set's direction and surprise follow the evidence; nothing forces either.
     assert "DIRECTIONALLY DIVERSE" not in hyp.user and "SURPRISING" not in hyp.system
     card = loader.render("knowledge_extract", **STAGE_VARIABLES["knowledge_extract"])
@@ -209,3 +216,36 @@ def test_a_prompt_temperature_outside_zero_to_one_is_rejected(tmp_path: Path) ->
     override.write_text("stages:\n  synthesis:\n    temperature: 0.2\n", encoding="utf-8")
     loader = PromptLoader("ml", override)
     assert loader.render("synthesis", **STAGE_VARIABLES["synthesis"]).temperature == 0.2
+
+
+def test_hypothesis_schema_fixes_the_estimand_orientation() -> None:
+    schema = PromptLoader("ml").snapshot()["blocks"]["hypothesis_schema"]
+    assert "exposure condition minus comparator condition" in schema
+    assert "'retrieval reduces error rate' is '< 0'" in schema
+
+
+def test_se_roles_keep_the_ml_role_names_and_output_contract() -> None:
+    se, ml = PromptLoader("se"), PromptLoader("ml")
+    assert se.role_names() == ml.role_names()
+    assert "software engineering" in se.render_role("pragmatist", **ROLE_VARIABLES).system
+    # Only the roles differ: stage prompts are the default bank.
+    assert se.render("hypothesis_gen", **STAGE_VARIABLES["hypothesis_gen"]) == ml.render(
+        "hypothesis_gen", **STAGE_VARIABLES["hypothesis_gen"]
+    )
+    for role in se.role_names():
+        user = se.render_role(role, **ROLE_VARIABLES).user
+        assert user.endswith('Return {"hypotheses": [ ... ]}')
+
+
+def test_run_domain_takes_the_first_name_with_a_role_set() -> None:
+    assert run_domain(["education", " SE ", "hep"], "ml") == "se"
+    assert run_domain(["education", "psychology", ""], "biology") == "biology"
+    assert run_domain([], "ml") == "ml"
+
+
+def test_roles_domain_changes_only_the_roles() -> None:
+    loader = PromptLoader("ml", roles_domain="biology")
+
+    assert loader.role_names() == PromptLoader("biology").role_names()
+    stage = loader.render("hypothesis_gen", **STAGE_VARIABLES["hypothesis_gen"]).system
+    assert "COBRApy" not in stage

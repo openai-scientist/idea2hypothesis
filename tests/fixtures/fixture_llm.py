@@ -213,7 +213,7 @@ class FixtureLLM:
         }
 
     def _default_search_strategy(self, info: PromptInfo) -> dict[str, Any]:
-        sq = info.ids(r"\"id\": \"(SQ\d+)\"")
+        sq = info.ids(r"\"id\":\s*\"(SQ\d+)\"")
         names = ["core_topic", "mechanisms", "measurement"]
         strategies = []
         for i, name in enumerate(names):
@@ -271,7 +271,7 @@ class FixtureLLM:
         card_ids = [c["card_id"] for c in cards]
         aside = card_ids[-1:] if len(card_ids) >= 3 else []  # one card fits no school of thought
         sorted_ids = card_ids[: len(card_ids) - len(aside)]
-        sq = info.ids(r"\"id\": \"(SQ\d+)\"")
+        sq = info.ids(r"\"id\":\s*\"(SQ\d+)\"")
         half = max(1, len(sorted_ids) // 2)
         return {
             "overview": "Evidence converges on a modest sleep effect with measurement gaps.",
@@ -340,6 +340,7 @@ class FixtureLLM:
         predictions = ["> 0", "< 0", "≠ 0", "> 0"]
         # Candidates of the debate argue from other mechanisms than the final set's first ones.
         shift = 0 if tag == "final" else 2
+        has_tension = re.search(r'"id":\s*"X1"', info.user) is not None
         items = []
         for i in range(count):
             items.append(
@@ -372,7 +373,7 @@ class FixtureLLM:
                     ),
                     "risk": "medium",
                     # The first hypothesis settles the synthesis tension when there is one.
-                    "tension_ids": ["X1"] if i == 0 and '"id": "X1"' in info.user else [],
+                    "tension_ids": ["X1"] if i == 0 and has_tension else [],
                 }
             )
         return items
@@ -465,7 +466,8 @@ class FixtureLLM:
         hypotheses = info.section_json("Hypotheses under review", "Novelty report:")["hypotheses"]
         return {"findings": [{
             "hypothesis_id": hypotheses[0]["id"], "field": "prediction", "severity": "minor",
-            "category": "baseline", "kind": "fix", "issue": "name the comparison condition",
+            "category": "baseline", "kind": "fix", "due": "now",
+            "issue": "name the comparison condition",
             "suggestion": "state the baseline",
         }]}  # fmt: skip
 

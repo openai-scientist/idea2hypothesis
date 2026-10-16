@@ -14,6 +14,7 @@ and resuming continues from the checkpoint.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -28,7 +29,7 @@ from idea2hypothesis.llm.models import (
     LLMTimeout,
 )
 from idea2hypothesis.pipeline import events as ev
-from idea2hypothesis.pipeline import gates
+from idea2hypothesis.pipeline import gates, reuse
 from idea2hypothesis.pipeline.contracts import CONTRACTS, missing_inputs, validate_stage
 from idea2hypothesis.pipeline.control import RunInterrupted
 from idea2hypothesis.pipeline.models import (
@@ -324,11 +325,48 @@ async def create_run(request: RunRequest, services: Services) -> str:
     services.store.create(
         run_id, record, config_snapshot=snapshot, prompts_snapshot=services.prompts.snapshot()
     )
+    reuse_problem = await _reuse_prior_run(request, services, run_id, topic, mode)
     await _emit(
         services, run_id, ev.RUN_STARTED,
         data={"topic": topic, "domains": domains, "review_mode": mode, "constraints": constraints},
     )  # fmt: skip
+    if request.prior_run_id:
+        text = (
+            f"Reused stages 1-7 of run {request.prior_run_id}; revising its hypotheses."
+            if reuse_problem is None
+            else f"Run {request.prior_run_id} was not reused ({reuse_problem}); "
+            "running every stage."
+        )
+        await _emit(
+            services, run_id, ev.STAGE_PROGRESS, stage=int(Stage.HYPOTHESIS_GEN),
+            data={"kind": "notice", "text": text},
+        )  # fmt: skip
     return run_id
+
+
+async def _reuse_prior_run(
+    request: RunRequest, services: Services, run_id: str, topic: str, mode: str
+) -> str | None:
+    """Adopt stages 1-7 of the request's prior run; returns why it could not, else ``None``."""
+    if not request.prior_run_id:
+        return None
+    try:
+        # Hashes and validates stages 1-7: keep it off the event loop.
+        why = await asyncio.to_thread(
+            reuse.problem, services.store, request.prior_run_id, topic,
+            list(request.domains or services.config.research.domains),
+            list(request.constraints or services.config.research.constraints),
+            mode=mode,
+        )  # fmt: skip
+        if why is None:
+            await asyncio.to_thread(
+                reuse.adopt, services.store, request.prior_run_id, run_id,
+                mode=mode, review_phase=request.review_phase,
+            )  # fmt: skip
+    except Exception:  # noqa: BLE001 - the run falls back to every stage
+        logger.exception("run %s: prior run %s could not be reused", run_id, request.prior_run_id)
+        why = "the prior run's files could not be copied"
+    return why
 
 
 async def run_pipeline(request: RunRequest, services: Services) -> RunResult:
@@ -677,6 +715,7 @@ def _rejection_feedback(
     spec: gates.GateSpec, art: Any, note: str, review_round: int | None = None
 ) -> str:
     lines = ["Reviewer feedback on the previous attempt (address it in this attempt):"]
+    findings: list[dict[str, Any]] = []
     if note.strip():
         lines.append(f"- {note.strip()}")
     if spec.kind == gates.HYPOTHESES and review_round is not None:
@@ -694,10 +733,21 @@ def _rejection_feedback(
     if spec.kind == gates.HYPOTHESES:
         try:
             doc = art.read_json(8, "hypotheses.json")
-            lines.append(
-                "- Previous hypotheses (write a better set, not the same one): "
-                + "; ".join(f"{h['id']}: {h['statement']}" for h in doc["hypotheses"])
-            )
+            previous = "; ".join(f"{h['id']}: {h['statement']}" for h in doc["hypotheses"])
+            if review_round is not None and not findings:
+                lines.append(f"- Previous hypotheses: {previous}")
+            elif review_round is not None:
+                lines.append(
+                    "- Keep every hypothesis that no finding above concerns unchanged (same id, "
+                    "same statement). Every previous id stays in the set, also one a finding "
+                    "concerns: revise it in place, never drop it or merge it into another, and "
+                    "change only what its findings require (keep its predicted direction unless "
+                    f"a finding is about the direction). Previous hypotheses: {previous}"
+                )
+            else:
+                lines.append(
+                    f"- Previous hypotheses (write a better set, not the same one): {previous}"
+                )
         except (OSError, ValueError, KeyError):
             pass
     if spec.kind == gates.SCREEN:

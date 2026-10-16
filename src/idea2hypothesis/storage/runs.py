@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from idea2hypothesis.pipeline.events import Event
+from idea2hypothesis.storage import filecache
 from idea2hypothesis.storage.artifacts import ArtifactStore, write_json_atomic
 
 SCHEMA_VERSION = 1
@@ -105,7 +106,7 @@ class RunStore:
 
     def read_run(self, run_id: str) -> dict[str, Any]:
         try:
-            raw = (self.run_dir(run_id) / "run.json").read_text(encoding="utf-8")
+            raw = filecache.read_text(self.run_dir(run_id) / "run.json")
         except (OSError, ValueError) as exc:
             raise RunNotFoundError(run_id) from exc
         return json.loads(raw)
@@ -120,14 +121,14 @@ class RunStore:
 
     def read_snapshot(self, run_id: str, name: str) -> dict[str, Any]:
         path = self.run_dir(run_id) / f"{name}.snapshot.json"
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(filecache.read_text(path))
 
     # -- checkpoint -------------------------------------------------------
 
     def read_checkpoint(self, run_id: str) -> dict[str, Any]:
         path = self.run_dir(run_id) / "checkpoint.json"
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(filecache.read_text(path))
         except (OSError, ValueError):
             data = {}
         data.setdefault("schema_version", SCHEMA_VERSION)
@@ -149,7 +150,7 @@ class RunStore:
         path = self._events_path(run_id)
         events: list[Event] = []
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = filecache.read_text(path).splitlines()
         except OSError:
             return events
         for line in lines:
@@ -188,17 +189,21 @@ class RunStore:
             path = self._events_path(run_id)
             line = json.dumps(event.to_dict(), ensure_ascii=False) + "\n"
             prefix = b""
-            if path.exists() and path.stat().st_size > 0:
-                with path.open("rb") as probe:
-                    probe.seek(-1, os.SEEK_END)
-                    if probe.read(1) != b"\n":  # heal a torn final line
-                        prefix = b"\n"
+            before = filecache.signature(path)
+            if before is not None and before[0] > 0:
+                last = filecache.last_byte(path)
+                if last is None:
+                    with path.open("rb") as probe:
+                        probe.seek(-1, os.SEEK_END)
+                        last = probe.read(1)
+                if last != b"\n":  # heal a torn final line
+                    prefix = b"\n"
+            payload = prefix + line.encode("utf-8")
             with path.open("ab") as handle:
-                if prefix:
-                    handle.write(prefix)
-                handle.write(line.encode("utf-8"))
+                handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
+            filecache.appended(path, before, payload)
             self._next_seq[run_id] = seq + 1
             return event
 
@@ -213,7 +218,7 @@ class RunStore:
 
     def _read_platform(self, platform_run_id: str) -> str | None:
         try:
-            data = json.loads(self._platform_path(platform_run_id).read_text(encoding="utf-8"))
+            data = json.loads(filecache.read_text(self._platform_path(platform_run_id)))
         except (OSError, ValueError):
             return None
         run_id = data.get("run_id")

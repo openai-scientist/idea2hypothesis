@@ -36,6 +36,9 @@ FINDING_CATEGORIES = (
 )  # fmt: skip
 FINDING_SEVERITIES = ("blocking", "major", "minor")
 FINDING_KINDS = ("fix", "needs_evidence")
+#: When a finding must be settled: ``later`` details are fixed by experiment design.
+FINDING_DUE = ("now", "later")
+RESOLUTION_STATUSES = ("resolved", "maintained")
 REVISION_OUTCOMES = ("fixed", "rebutted", "not_fixed")
 CARD_FIELDS = ("problem", "method", "data", "metrics", "findings", "limitations")
 CARD_CONTENT_FIELDS = ("problem", "method", "findings", "limitations")
@@ -884,11 +887,17 @@ def check_novelty_judgements(data: Any, papers: dict[str, set[str]]) -> Findings
         ):
             continue
         unknown = sorted(set(ids) - papers[hyp])
-        f.require(
-            not unknown,
-            f"judgements[{i}]: {', '.join(unknown)} were not given for {hyp}; name only "
-            f"{', '.join(sorted(papers[hyp]))}",
-        )
+        listed = [p for p in ids if p in papers[hyp]]
+        if unknown and (listed or verdict == "new"):
+            # Ids that were never given cannot support a verdict: drop them, keep the rest.
+            row["paper_ids"] = ids = listed
+            f.warn(f"judgements[{i}]: dropped {', '.join(unknown)}, not given for {hyp}")
+        else:
+            f.require(
+                not unknown,
+                f"judgements[{i}]: {', '.join(unknown)} were not given for {hyp}; name only "
+                f"{', '.join(sorted(papers[hyp]))}",
+            )
         if verdict == "new":
             f.require(not ids, f"judgements[{i}]: a 'new' verdict names no paper")
         elif verdict in NOVELTY_VERDICTS:

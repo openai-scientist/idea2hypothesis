@@ -127,6 +127,42 @@ README are copied into `tests/contract/vendor/`, with the management commit in
 `tests/contract/vendor/SOURCE`. Do not edit the copy by hand; refresh it as described in
 [AGENTS.md](AGENTS.md).
 
+### Artifacts, review and send-back
+
+Each delivery of the hypotheses also delivers `i2h.evidence/v1`, a non-primary artifact for the next
+stage. It holds the knowledge cards that the delivered hypotheses cite (`evidence_refs`), once each:
+
+```json
+{"schema_version": "i2h.evidence/v1",
+ "cards": [{"card_id": "card-p-1", "paper_id": "p-1", "title": "...", "year": 2024, "venue": null,
+            "doi": null, "url": null, "data": "...", "metrics": "...", "findings": "...",
+            "limitations": "...", "hypothesis_ids": ["H1", "H3"]}]}
+```
+
+A revision or a dropped hypothesis delivers a new version. The other outputs are the primary
+`i2h.hypotheses/v1`, `review.findings/v1`, `revision.response/v1`, `revision.diff/v1` and
+`i2h.argument_map/v1`.
+
+The independent review converges. Each finding says when it is due: protocol details that
+experiment design fixes (tool versions, seeds, replication counts, sample sizes, compute caps,
+dataset revisions, exact fault lists) are `later` and become minor findings with the prefix
+`[for experiment design]`. After a researcher comment, the reviewer sees the previous round's
+findings and the hypotheses the revision changed (compared by content, by id, against the set the
+previous round reviewed). It answers every earlier blocking finding with `resolved` or
+`maintained`; a maintained finding stays blocking and names the earlier id. A new blocking finding
+on a hypothesis the revision did not change is only major, with the prefix `[unchanged]`.
+
+Capabilities declare `reuses_prior_run = true`. When `inputs.prior_engine_run_id` names a run in the
+local store with the same topic and valid stages 1-7, the new run copies those stages, does not
+ask their gates again, and starts at stage 8 with the guidance and feedback lines and the earlier
+final hypotheses as the set to revise (hypotheses the lines do not concern stay as they are).
+Otherwise the run executes every stage, and one activity says why the prior run was not reused.
+
+The run's domain picks the hypothesis roles: the first name in `inputs.params.domains`, then the
+request profile's domain, that has a role set (`ml`, `hep`, `biology`, `se`); otherwise
+`prompts.domain` of the configuration. `se` is empirical software engineering and uses the `ml`
+role names (innovator, pragmatist, contrarian).
+
 ## Use as a library
 
 ```python

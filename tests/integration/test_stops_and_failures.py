@@ -50,6 +50,18 @@ async def test_rejecting_every_paper_stops_at_stage_5(tmp_path: Path) -> None:
     assert all(d["reason"] for d in review["decisions"])
 
 
+async def test_an_empty_shortlist_names_the_sources_that_were_down(tmp_path: Path) -> None:
+    # Live: OpenAlex was rate limited for hours; the off-topic rest was all rejected.
+    llm = FixtureLLM(keep_title=lambda title: False)
+    literature = FixtureLiterature(source_errors={"arxiv": "HTTP 429 (rate limited)"})
+    services = make_services(tmp_path, llm=llm, literature=literature, review={"mode": "auto"})
+    result = await run_pipeline(request(), services)
+
+    assert result.status is RunStatus.FAILED
+    assert result.error is not None and result.error.code == "SOURCES_UNAVAILABLE"
+    assert "arxiv (HTTP 429 (rate limited))" in result.error.message
+
+
 async def test_non_researchable_topic_stops_at_stage_1(tmp_path: Path) -> None:
     llm = FixtureLLM(
         overrides={
@@ -91,6 +103,35 @@ async def test_low_topic_score_stops_after_stage_2(tmp_path: Path) -> None:
     assert "narrow it" in result.error.message
     evaluation = services.store.artifacts(result.run_id).read_json(2, "topic_evaluation.json")
     assert evaluation["overall"] == 2.7  # recomputed from the three scores, not trusted
+
+
+async def test_research_lead_direction_waives_the_topic_threshold(tmp_path: Path) -> None:
+    llm = FixtureLLM(
+        overrides={
+            "topic_evaluation": {
+                "novelty": 2,
+                "specificity": 3,
+                "feasibility": 3,
+                "overall": 9,
+                "reasons": {"novelty": "n", "specificity": "s", "feasibility": "f"},
+                "suggestion": "narrow it",
+            }
+        }
+    )
+    services = make_services(tmp_path, llm=llm, review={"mode": "auto"})
+    result = await run_pipeline(
+        request(constraints=("Research lead: study sleep and exam scores",)), services
+    )
+
+    assert result.error is None or result.error.code != "TOPIC_BELOW_THRESHOLD"
+    assert 2 in result.completed_stages
+    evaluation = services.store.artifacts(result.run_id).read_json(2, "topic_evaluation.json")
+    assert evaluation["threshold_waived"] == {
+        "reason": "the run has research-lead direction",
+        "score": 2.7,
+        "threshold": evaluation["threshold"],
+        "advice": "narrow it",
+    }
 
 
 async def test_invalid_json_is_repaired_once_then_accepted(tmp_path: Path) -> None:

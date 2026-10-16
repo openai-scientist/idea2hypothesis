@@ -2,14 +2,42 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/**']
+    tags: ['**']
   pull_request:
+  merge_group:
+  release:
+    types: [published]
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.select.outputs.run }}
+      full: ${{ steps.select.outputs.full }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: select
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          FORCE_FULL: ${{ github.event_name != 'pull_request' }}
+        run: |
+          if [ "$FORCE_FULL" = true ]; then
+            python tools/test_feedback.py --full --dry-run --github-output "$GITHUB_OUTPUT"
+          else
+            python tools/test_feedback.py --base "$BASE" --committed-only --dry-run --github-output "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: changes
     name: ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -22,6 +50,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -37,7 +67,16 @@ jobs:
         run: python -m ruff check .
 
       - name: Tests (unit, integration, contracts; no network)
-        run: python -m pytest -q
+        if: needs.changes.outputs.run == 'true'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          FULL: ${{ needs.changes.outputs.full }}
+        run: |
+          if [ "$FULL" = true ]; then
+            python tools/test_feedback.py --full
+          else
+            python tools/test_feedback.py --base "$BASE" --committed-only
+          fi
 
       - name: Build sdist and wheel
         run: python -m build
@@ -76,6 +115,7 @@ jobs:
           else
             PY="$RUNNER_TEMP/core-venv/bin/python"
           fi
+
           "$PY" -m pip install dist/*.whl
           cd "$RUNNER_TEMP"
           "$PY" -c "
@@ -125,3 +165,15 @@ jobs:
             echo "legacy name found" >&2
             exit 1
           fi
+
+  gate:
+    name: gate
+    if: always()
+    needs: [changes, test, names]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require successful selection and successful or skipped checks
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python tools/test_feedback.py --gate "$NEEDS"

@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -17,7 +18,10 @@ from typing import Any
 
 import yaml
 
-DOMAINS = ("ml", "hep", "biology")
+DOMAINS = ("ml", "hep", "biology", "se")
+#: Domains that also override stage prompts (``prompts/domains/<name>.yaml``); the others of
+#: ``DOMAINS`` change only the hypothesis roles.
+OVERRIDE_DOMAINS = ("hep", "biology")
 _ENTRY_FIELDS = {"system", "user", "json_mode", "max_tokens", "temperature", "guidance"}
 _VAR_RE = re.compile(r"\{\{(\w+)\}\}")
 _INCLUDE_RE = re.compile(r"\{\{>\s*(\w+)\s*\}\}")
@@ -68,13 +72,32 @@ def _validate_entry(key: str, entry: Any, origin: str) -> dict[str, Any]:
     return dict(entry)
 
 
-class PromptLoader:
-    """Resolves prompts for one domain, with optional user override file."""
+def run_domain(names: Sequence[str], default: str) -> str:
+    """The first of ``names`` that has a role set (ignoring case), else ``default``."""
+    return next((n for n in (x.strip().lower() for x in names) if n in DOMAINS), default)
 
-    def __init__(self, domain: str = "ml", override_file: str | Path | None = None) -> None:
-        if domain not in DOMAINS:
-            raise PromptError(f"unknown prompt domain {domain!r}; expected one of {list(DOMAINS)}")
+
+class PromptLoader:
+    """Resolves prompts for one domain, with optional user override file.
+
+    ``roles_domain`` (default ``domain``) picks only the hypothesis role set; stage prompt
+    overrides follow ``domain`` alone.
+    """
+
+    def __init__(
+        self,
+        domain: str = "ml",
+        override_file: str | Path | None = None,
+        roles_domain: str | None = None,
+    ) -> None:
+        roles_domain = roles_domain or domain
+        for name in (domain, roles_domain):
+            if name not in DOMAINS:
+                raise PromptError(
+                    f"unknown prompt domain {name!r}; expected one of {list(DOMAINS)}"
+                )
         self.domain = domain
+        self.roles_domain = roles_domain
         self.override_file = str(override_file) if override_file else ""
 
         base = _read_package_yaml("stages.yaml")
@@ -87,15 +110,15 @@ class PromptLoader:
         }
 
         roles_file = _read_package_yaml("hypothesis_roles.yaml")
-        roles = (roles_file.get("roles") or {}).get(domain)
+        roles = (roles_file.get("roles") or {}).get(roles_domain)
         if not roles:
-            raise PromptError(f"hypothesis_roles.yaml has no roles for domain {domain!r}")
+            raise PromptError(f"hypothesis_roles.yaml has no roles for domain {roles_domain!r}")
         self._roles: dict[str, dict[str, Any]] = {
             name: _validate_entry(name, entry, "hypothesis_roles.yaml")
             for name, entry in roles.items()
         }
 
-        if domain != "ml":
+        if domain in OVERRIDE_DOMAINS:
             self._apply(_read_package_yaml("domains", f"{domain}.yaml"), f"domains/{domain}.yaml")
         if override_file:
             self._apply(self._read_override(Path(override_file)), str(override_file))
@@ -213,6 +236,7 @@ class PromptLoader:
         """Template texts and a content hash, stored with each run for reproducibility."""
         content = {
             "domain": self.domain,
+            "roles_domain": self.roles_domain,
             "override_file": self.override_file,
             "prompts": copy.deepcopy(self._prompts),
             "blocks": dict(self._blocks),

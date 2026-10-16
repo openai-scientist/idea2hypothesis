@@ -102,6 +102,8 @@ class RunRequest:
     budget_usd: float | None = None
     #: Contract runs: an independent review precedes the hypotheses gate, which opens in every mode.
     review_phase: bool = False
+    #: Contract runs: an earlier run whose stages 1-7 this run reuses (see ``pipeline/reuse.py``).
+    prior_run_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -11,6 +11,8 @@ from idea2hypothesis.stages.topic_init import goal_for_prompt
 from idea2hypothesis.storage.runs import utc_now
 
 STAGE = 2
+#: Any research-lead line waives the topic threshold: the lead owns the framing.
+LEAD_FRAMING_PREFIXES = ("Research lead: ", "Feedback from a later stage: ")
 
 
 def render_tree_markdown(tree: dict[str, Any]) -> str:
@@ -77,15 +79,32 @@ async def run(ctx: StageContext) -> list[str]:
         "basis": "model judgement before any literature search",
     }
 
+    below = overall < ctx.config.research.min_topic_score
+    # The research lead has already fixed the framing: a low prior score does not stop the run.
+    waived = below and any(c.startswith(LEAD_FRAMING_PREFIXES) for c in ctx.constraints)
+    if waived:
+        evaluation["threshold_waived"] = {
+            "reason": "the run has research-lead direction",
+            "score": overall,
+            "threshold": ctx.config.research.min_topic_score,
+            "advice": evaluation["suggestion"],
+        }
+
     ctx.artifacts.write_json(STAGE, "problem_tree.json", tree)
     ctx.artifacts.write_text(STAGE, "problem_tree.md", render_tree_markdown(tree))
     ctx.artifacts.write_json(STAGE, "topic_evaluation.json", evaluation)
 
-    if overall < ctx.config.research.min_topic_score:
+    if below and not waived:
         raise StageFailure(
             "TOPIC_BELOW_THRESHOLD",
             f"topic scored {overall}/10, below the required {ctx.config.research.min_topic_score}. "
             f"{evaluation['suggestion']}".strip(),
             (*warnings, *eval_warnings),
+        )
+    if waived:
+        warnings = (
+            *warnings,
+            f"topic scored {overall}/10, below {ctx.config.research.min_topic_score}; "
+            "the threshold was waived because the research lead directs this run",
         )
     return [*warnings, *eval_warnings]

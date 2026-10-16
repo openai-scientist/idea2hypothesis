@@ -105,6 +105,25 @@ def test_novelty_judgements_name_only_the_papers_given() -> None:
     )
 
 
+def test_novelty_judgements_drop_ids_that_were_not_given_when_something_valid_remains() -> None:
+    papers = {"H1": {"p-1", "p-2"}, "H2": {"p-3"}}
+    data = {"judgements": [
+        {"hypothesis_id": "H1", "verdict": "tested", "paper_ids": ["p-1", "p-9"], "reason": "r"},
+        {"hypothesis_id": "H2", "verdict": "new", "paper_ids": ["p-9"], "reason": "r"},
+    ]}  # fmt: skip
+    result = check_novelty_judgements(data, papers)
+    assert result.ok and len(result.warnings) == 2
+    assert data["judgements"][0]["paper_ids"] == ["p-1"]
+    assert data["judgements"][1]["paper_ids"] == []
+    only_unknown = {"judgements": [
+        {"hypothesis_id": "H1", "verdict": "tested", "paper_ids": ["p-9"], "reason": "r"},
+        {"hypothesis_id": "H2", "verdict": "new", "paper_ids": [], "reason": "r"},
+    ]}  # fmt: skip
+    assert "p-9 were not given for H1" in " ".join(
+        check_novelty_judgements(only_unknown, papers).errors
+    )
+
+
 def test_expand_queries_leaves_out_the_words_of_a_question() -> None:
     topic = "Does retrieval-augmented generation reduce hallucinations, and when does it fail?"
     extra = expand_queries([], topic)
@@ -127,7 +146,10 @@ def test_prefilter_splits_by_keyword_overlap_and_sorts_by_overlap() -> None:
         {"paper_id": "c", "title": "Sleep and exam", "abstract": "exam sleep students"},
     ]
     keep, dropped = screen.prefilter(candidates, ["sleep", "exam", "students"])
-    assert [r["paper_id"] for r in keep] == ["c", "b"]
+    assert [r["paper_id"] for r in keep] == ["c"]  # 3 keywords: one match is not enough
+    assert [r["paper_id"] for r in dropped] == ["a", "b"]
+    keep, dropped = screen.prefilter(candidates, ["sleep", "exam"])
+    assert [r["paper_id"] for r in keep] == ["c", "b"]  # fewer than 3 keywords: one is enough
     assert [r["paper_id"] for r in dropped] == ["a"]
 
 
@@ -143,6 +165,38 @@ def test_the_reviewer_sees_unknown_citations_as_null_not_zero() -> None:
     assert screen._prompt_view(row("semantic_scholar"))["citation_count"] == 0
     legacy = {"paper_id": "p-2", "title": "t", "abstract": "a", "citation_count": 7}
     assert screen._prompt_view(legacy)["citation_count"] == 7
+
+
+def test_prefilter_matches_whole_words_only() -> None:
+    candidates = [
+        {"paper_id": "a", "title": "HTML pages", "abstract": "markup"},
+        {"paper_id": "b", "title": "Deep-learning for ML", "abstract": "x"},
+    ]
+    keep, dropped = screen.prefilter(candidates, ["ml", "deep-learning"])
+    assert [r["paper_id"] for r in keep] == ["b"]
+    assert [r["paper_id"] for r in dropped] == ["a"]
+
+
+def test_prefilter_needs_two_matches_from_three_keywords_and_can_be_relaxed() -> None:
+    candidates = [
+        {"paper_id": "a", "title": "Sleep", "abstract": "only one"},
+        {"paper_id": "b", "title": "Sleep exam", "abstract": "two"},
+    ]
+    keywords = ["sleep", "exam", "students"]
+    assert [r["paper_id"] for r in screen.prefilter(candidates, keywords)[0]] == ["b"]
+    relaxed = screen.prefilter(candidates, keywords, min_overlap=1)[0]
+    assert [r["paper_id"] for r in relaxed] == ["b", "a"]
+
+
+def test_the_strict_prefilter_is_relaxed_when_too_few_papers_remain() -> None:
+    keywords = ["sleep", "exam", "students"]
+    strong = [{"paper_id": f"s{i}", "title": "Sleep exam", "abstract": "x"} for i in range(6)]
+    weak = [{"paper_id": "w", "title": "Sleep", "abstract": "x"}]
+    to_screen, dropped, warns = screen.select_for_screening(strong + weak, keywords, 2)
+    assert len(to_screen) == 6 and [r["paper_id"] for r in dropped] == ["w"] and not warns
+    to_screen, dropped, warns = screen.select_for_screening(strong + weak, keywords, 3)
+    assert len(to_screen) == 7 and not dropped
+    assert len(warns) == 1 and "relaxed" in warns[0]
 
 
 def test_prefilter_sets_aside_papers_without_an_abstract() -> None:
@@ -423,8 +477,6 @@ def test_every_challenge_gets_an_answer_that_does_what_it_says() -> None:
                                           "hypotheses": revised},
         "you revise hypothesis 1 but it is unchanged": {
             "answers": answers((1, "revise"), (2, "defend")), "hypotheses": before},
-        "list 2 in withdrawn": {"answers": answers((1, "defend"), (2, "withdraw")),
-                                "hypotheses": before},
         "answered more than once": {"answers": answers((1, "defend"), (1, "defend"), (2, "defend")),
                                     "hypotheses": before},
         "keep all 2 hypotheses": {"answers": answers((1, "defend"), (2, "defend")),
@@ -433,6 +485,18 @@ def test_every_challenge_gets_an_answer_that_does_what_it_says() -> None:
     }  # fmt: skip
     for needle, bad in cases.items():
         assert any(needle in e for e in check_answers(bad, before, challenges).errors), needle
+
+
+def test_a_withdrawal_missing_from_the_list_is_added_with_a_warning() -> None:
+    before = [{"statement": "a"}, {"statement": "b"}]
+    challenges = [{"from": "x", "response": 1, "hypothesis": 2, "text": "t"}]
+    data = {"answers": [{"challenge": 1, "action": "withdraw", "text": "because"}],
+            "hypotheses": before}  # fmt: skip
+    result = check_answers(data, before, challenges)
+    assert result.ok and data["withdrawn"] == [2]
+    assert len(result.warnings) == 1 and "withdrawn but not listed" in result.warnings[0]
+    kept = {**data, "answers": [{"challenge": 1, "action": "defend", "text": "because"}]}
+    assert check_answers(kept, before, challenges).warnings == []
 
 
 def test_a_fatal_challenge_names_its_flaw_and_where_it_is() -> None:
@@ -509,6 +573,13 @@ def test_the_final_set_uses_a_fatal_candidate_only_to_reach_the_minimum() -> Non
     )
     assert any("write between 2 and 6" in e for e in merge(["innovator-2"]))
     assert any("must list the candidate ids" in e for e in merge([], ["innovator-2"]))
+    # a held-back candidate listed in not_used is dropped: held_back already records it
+    from idea2hypothesis.stages.hypothesis_gen import drop_redundant_not_used
+
+    held = {"candidate": "innovator-1", "reason": "over_limit", "text": "fatal objection"}
+    data = {"hypotheses": [{"id": "H1", "from": ["innovator-2"]}], "not_used": [held]}
+    drop_redundant_not_used(data, candidates)
+    assert data["not_used"] == []
 
 
 def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why() -> None:
@@ -526,9 +597,14 @@ def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why(
         )
     }
 
-    def errors(hyps: list[dict], not_used: list[dict] | None = None, maximum: int = 6) -> str:
+    def errors(
+        hyps: list[dict],
+        not_used: list[dict] | None = None,
+        maximum: int = 6,
+        lead_directed: bool = False,
+    ) -> str:
         data = {"hypotheses": hyps, "not_used": not_used or []}
-        return " | ".join(check_merge(data, candidates, 2, maximum).errors)
+        return " | ".join(check_merge(data, candidates, 2, maximum, lead_directed).errors)
 
     note = "pragmatist-1 gives the claim; innovator-1 gives the test"
     one = {
@@ -544,9 +620,10 @@ def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why(
         [{**one, "merge_note": " "}, *rest]
     )
     clash = {"id": "H1", "from": ["pragmatist-1", "contrarian-1"], "merge_note": note}
-    assert "predict different effects" in errors(
-        [clash, rest[1], {"id": "H3", "from": ["innovator-1"]}]
-    )
+    merge_clash = errors([clash, rest[1], {"id": "H3", "from": ["innovator-1"]}])
+    assert "predict different effects" in merge_clash
+    assert "canonical orientation (exposure minus comparator)" in merge_clash
+    assert "keep them separate" in merge_clash
     # innovator-2 is cleared and unused: it needs a reason
     assert "candidates ['innovator-2'] are not used" in errors([one, rest[0]])
     dup = {"candidate": "innovator-2", "reason": "duplicate", "of": "H1", "text": "same claim"}
@@ -555,10 +632,46 @@ def test_a_merge_keeps_each_claim_and_every_cleared_candidate_left_out_says_why(
     full = {**dup, "reason": "over_limit", "of": None}
     assert "there is room for innovator-2" in errors([one, rest[0]], [full])
     assert not errors([one, rest[0]], [full], maximum=2)
+    # the research lead's direction can leave a candidate out below the maximum, only when given
+    lead = {**dup, "reason": "lead_direction", "of": None, "text": "Research lead: narrow scope"}
+    assert not errors([one, rest[0]], [lead], lead_directed=True)
+    assert "no research-lead direction" in errors([one, rest[0]], [lead])
+    assert "say why in text" in errors([one, rest[0]], [{**lead, "text": ""}], lead_directed=True)
+    # only a handoff or send-back feedback is direction; the lead's framing lines are not
+    from idea2hypothesis.stages.hypothesis_gen import LEAD_DIRECTION_PREFIXES
+
+    def directed(constraint: str) -> bool:
+        return constraint.startswith(LEAD_DIRECTION_PREFIXES)
+
+    assert directed("Research lead: Handoff: drop the observational designs")
+    assert directed("Feedback from a later stage: add a falsifier")
+    framing = "Research lead: Research question: does sleep raise scores?"
+    assert not directed(framing)
+    assert not directed("Research lead: Objective: map the evidence")
+    assert "no research-lead direction" in errors(
+        [one, rest[0]], [lead], lead_directed=directed(framing)
+    )
     assert "is used by the set" in errors([one, *rest], [{**dup, "candidate": "pragmatist-1"}])
+    # the merge drops such entries before the check instead of asking for a repair
+    from idea2hypothesis.stages.hypothesis_gen import drop_redundant_not_used
+
+    redundant = {"hypotheses": [one, *rest], "not_used": [{**dup, "candidate": "pragmatist-1"}]}
+    drop_redundant_not_used(redundant, candidates)
+    assert redundant["not_used"] == []
+    assert check_merge(redundant, candidates, 2, 6).ok
+    unknown = {"hypotheses": [one, *rest], "not_used": [{**dup, "candidate": "ghost-1"}]}
+    drop_redundant_not_used(unknown, candidates)
+    assert "is used by the set" in " | ".join(check_merge(unknown, candidates, 2, 6).errors)
+    malformed = {"hypotheses": [one, *rest], "not_used": [{**dup, "candidate": ["innovator-2"]}]}
+    drop_redundant_not_used(malformed, candidates)  # no TypeError: the check reports it
+    assert malformed["not_used"] == [{**dup, "candidate": ["innovator-2"]}]
     assert "say why in text" in errors([one, rest[0]], [{**dup, "text": ""}])
     # a duplicate repeats the claim of the hypothesis it names
-    assert "it is not a duplicate" in errors([one, rest[0]], [{**dup, "of": "H2"}])
+    sign_clash = errors([one, rest[0]], [{**dup, "of": "H2"}])
+    assert "only the subtraction order differs" in sign_clash
+    assert "canonical orientation (exposure minus comparator)" in sign_clash
+    assert "list the reversed candidate in 'reoriented'" in sign_clash
+    assert "use it, or give over_limit" in sign_clash
 
 
 def test_a_benefit_and_a_negligible_effect_are_never_merged() -> None:
@@ -771,6 +884,139 @@ def test_a_field_naming_four_benchmarks_apart_quotes_each_place() -> None:
     assert check_card_quotes(card, abstract).ok
     card["quotes"] = {"data": quotes * 2}
     assert any("give at most 6" in e for e in check_card_quotes(card, abstract).errors)
+
+
+def test_prefilter_whole_word_match_allows_a_plural():
+    from idea2hypothesis.stages.literature_screen import keyword_overlap
+
+    assert keyword_overlap("two new benchmarks for dense retrieval", ["benchmark", "dense"]) == 2
+    assert keyword_overlap("an html parser", ["ml"]) == 0
+
+
+class _FeedbackArtifacts:
+    def read_run_json(self, name: str):
+        return [
+            {
+                "finding_id": "f1",
+                "anchor": {"locator": "H2"},
+                "issue": "no falsifier",
+                "suggestion": "add one",
+            }
+        ]
+
+    def read_json(self, stage: int, name: str) -> dict:
+        return {"hypotheses": [{"id": "H1", "statement": "A raises B"}]}
+
+
+def test_a_review_revision_keeps_the_hypotheses_no_finding_concerns():
+    from idea2hypothesis.pipeline import gates
+    from idea2hypothesis.pipeline.runner import _rejection_feedback
+
+    spec = gates.gate_by_kind(gates.HYPOTHESES)
+    text = _rejection_feedback(spec, _FeedbackArtifacts(), "", review_round=1)
+    assert "finding f1 at H2" in text
+    assert "no finding above concerns unchanged (same id, same statement)" in text
+    assert "Every previous id stays in the set" in text and "never drop it" in text
+    assert "H1: A raises B" in text
+    assert "write a better set" not in text
+
+
+def test_a_review_round_without_findings_has_no_keep_instruction():
+    from idea2hypothesis.pipeline import gates
+    from idea2hypothesis.pipeline.runner import _rejection_feedback
+
+    class NoFindings(_FeedbackArtifacts):
+        def read_run_json(self, name: str):
+            return []
+
+    spec = gates.gate_by_kind(gates.HYPOTHESES)
+    text = _rejection_feedback(spec, NoFindings(), "", review_round=1)
+    assert "- Previous hypotheses: H1: A raises B" in text
+    assert "unchanged" not in text
+    assert "write a better set" not in text
+
+
+def test_a_plain_rejection_still_asks_for_a_better_set():
+    from idea2hypothesis.pipeline import gates
+    from idea2hypothesis.pipeline.runner import _rejection_feedback
+
+    spec = gates.gate_by_kind(gates.HYPOTHESES)
+    text = _rejection_feedback(spec, _FeedbackArtifacts(), "too vague")
+    assert "write a better set, not the same one" in text
+    assert "unchanged" not in text
+
+
+def test_a_merge_may_flip_a_candidate_whose_subtraction_is_reversed() -> None:
+    # Live: "supported minus unsupported < 0" and "unsupported minus supported > 0" are one claim.
+    candidates = {
+        "innovator-3": Candidate("innovator-3", "innovator", 3, {"prediction": "< 0"}),
+        "contrarian-3": Candidate("contrarian-3", "contrarian", 3, {"prediction": "> 0"}),
+    }
+    merged = {"id": "H1", "from": ["innovator-3", "contrarian-3"], "merge_note": "flipped"}
+    rest = {"id": "H2", "from": ["innovator-3"]}
+
+    def errors(**extra: object) -> list[str]:
+        return check_merge({"hypotheses": [merged | extra, rest]}, candidates, 2, 6).errors
+
+    assert any("predict different effects" in e for e in errors())
+    assert not any("predict different effects" in e for e in errors(reoriented=["contrarian-3"]))
+    assert any("must be candidates listed in from" in e for e in errors(reoriented=["other-1"]))
+
+
+def test_round_view_ignores_a_review_that_failed() -> None:
+    from idea2hypothesis.stages.hypothesis_gen import _round_view
+
+    before = [{"id": "H1", "statement": "a"}]
+    failed = {"round": 1, "error": "reviewer timed out", "findings": []}
+    assert _round_view(failed, 1, before, before) is None
+    assert _round_view(None, 1, before, before) is None
+    ok = {"round": 1, "findings": [{"hypothesis_id": "H1", "severity": "blocking"}]}
+    view = _round_view(ok, 1, before, before)
+    assert view is not None and view[0][0]["id"] == "F1-1" and view[1] == set()
+
+
+def test_named_ids_count_every_research_lead_line_but_the_charter_framing() -> None:
+    from types import SimpleNamespace
+
+    from idea2hypothesis.stages.hypothesis_gen import _named_ids
+
+    prior = {"H1": "a", "H2": "b", "H3": "c"}
+
+    def named(*constraints: str) -> set[str]:
+        return _named_ids(SimpleNamespace(constraints=list(constraints), feedback=""), prior)
+
+    risk = "Research lead: Known risk R1 (from hypothesis, H1, finding F4-1): confounding"
+    assert named(risk) == {"H1"}
+    assert named("Research lead: Directive: tighten H2") == {"H2"}
+    assert named("Research lead: Handoff: drop H3") == {"H3"}
+    assert named("Research lead: Research question: does H1 hold?") == set()
+
+
+def test_revision_note_blank_is_repaired_or_defaulted() -> None:
+    from idea2hypothesis.api.contract.review import revision_response
+    from idea2hypothesis.stages.hypothesis_gen import _check_revision_responses
+
+    for note in ("  ", 5, None):
+        doc = {"items": [{"finding_id": "F1-1", "outcome": "rebutted", "note": note}]}
+        item = revision_response(doc, round_=1, before="a", after="b").items[0]
+        assert item.note and item.note.strip()
+    blank = {"revision_responses": [{"finding_id": "F1-1", "outcome": "rebutted", "note": " "}]}
+    assert _check_revision_responses(blank, ["F1-1"]).errors
+    fixed = {"revision_responses": [{"finding_id": "F1-1", "outcome": "fixed"}]}
+    assert not _check_revision_responses(fixed, ["F1-1"]).errors
+
+
+def test_sources_down_needs_every_request_to_fail(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    meta = {
+        "per_source": {
+            "openalex": {"requests": 4, "papers": 0, "errors": ["HTTP 429"]},
+            "arxiv": {"requests": 2, "papers": 0, "errors": ["boom", "boom"]},
+        }
+    }
+    ctx = SimpleNamespace(artifacts=SimpleNamespace(read_json=lambda stage, name: meta))
+    assert screen._sources_down(ctx) == ["arxiv (boom)"]
 
 
 def test_canvas_names_each_record_once() -> None:

@@ -33,7 +33,7 @@ class StageFailure(Exception):
 
 
 def compact_json(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, indent=1)
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
 def bullet_list(items: tuple[str, ...] | list[str], empty: str = "none") -> str:

@@ -275,8 +275,15 @@ def check_answers(data: Any, before: list[dict[str, Any]], challenges: list[Any]
                 f"challenge {n}: you revise hypothesis {k} but it is unchanged; change the "
                 "field the challenge is about",
             )
-        if action == "withdraw":
-            f.require(k in withdrawn, f"challenge {n}: you withdraw {k}; list {k} in withdrawn")
+        if action == "withdraw" and k not in withdrawn:
+            # The answer already withdraws it: complete the list instead of asking again.
+            listed = data.get("withdrawn")
+            if listed is None or isinstance(listed, list):
+                data["withdrawn"] = [*(listed or []), k]
+                withdrawn.append(k)
+                f.warn(f"challenge {n}: hypothesis {k} was withdrawn but not listed; added")
+            else:
+                f.error(f"challenge {n}: you withdraw {k}; list {k} in withdrawn")
     missing = [n for n in range(1, len(challenges) + 1) if n not in seen]
     f.require(not missing, f"challenges {missing} have no answer; answer every challenge once")
     return f

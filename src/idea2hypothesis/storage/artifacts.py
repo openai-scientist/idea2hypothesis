@@ -13,6 +13,8 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
+from idea2hypothesis.storage import filecache
+
 SCHEMA_VERSION = 1
 STAGE_COUNT = 9
 
@@ -33,6 +35,7 @@ def write_bytes_atomic(path: Path, data: bytes) -> None:
         for attempt in range(6):
             try:
                 os.replace(tmp, path)
+                filecache.wrote(path, data)
                 return
             except PermissionError:  # transient on Windows while a reader holds the file
                 if attempt == 5:
@@ -83,7 +86,7 @@ class ArtifactStore:
     # -- reads ------------------------------------------------------------
 
     def read_text(self, stage: int, relpath: str) -> str:
-        return self.path(stage, relpath).read_text(encoding="utf-8")
+        return filecache.read_text(self.path(stage, relpath))
 
     def read_json(self, stage: int, relpath: str) -> Any:
         return json.loads(self.read_text(stage, relpath))
@@ -113,7 +116,7 @@ class ArtifactStore:
         names = list(files) if files is not None else self.list_files(stage)
         entries = []
         for name in names:
-            data = self.path(stage, name).read_bytes()
+            data = filecache.read_bytes(self.path(stage, name))
             entries.append(
                 {"path": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
             )
@@ -141,7 +144,7 @@ class ArtifactStore:
             return False
         for entry in manifest.get("files", []):
             try:
-                data = self.path(stage, entry["path"]).read_bytes()
+                data = filecache.read_bytes(self.path(stage, entry["path"]))
             except (OSError, KeyError, ValueError):
                 return False
             if hashlib.sha256(data).hexdigest() != entry.get("sha256"):
@@ -162,7 +165,7 @@ class ArtifactStore:
     def read_run_json(self, name: str) -> Any | None:
         """The stored document, or ``None`` when it is missing or unreadable."""
         try:
-            return json.loads(self._run_file(name).read_text(encoding="utf-8"))
+            return json.loads(filecache.read_text(self._run_file(name)))
         except (OSError, ValueError):
             return None
 
@@ -187,7 +190,7 @@ class ArtifactStore:
     def read_partial(self, stage: int, attempt: int, name: str) -> Any | None:
         """The stored piece, or ``None`` when it is missing or unreadable."""
         try:
-            return json.loads(self._partial_path(stage, attempt, name).read_text(encoding="utf-8"))
+            return json.loads(filecache.read_text(self._partial_path(stage, attempt, name)))
         except (OSError, ValueError):
             return None
 
@@ -215,7 +218,7 @@ class ArtifactStore:
         rows: list[dict[str, Any]] = []
         for path in sorted(base.glob("*.json")) if base.exists() else []:
             try:
-                rows.append(json.loads(path.read_text(encoding="utf-8")))
+                rows.append(json.loads(filecache.read_text(path)))
             except (OSError, ValueError):
                 continue
         return rows
@@ -225,6 +228,14 @@ class ArtifactStore:
     def reset_stage(self, stage: int) -> None:
         shutil.rmtree(self.stage_dir(stage), ignore_errors=True)
         self.stage_dir(stage).mkdir(parents=True, exist_ok=True)
+
+    def read_archived_json(self, attempt: int, stage: int, relpath: str) -> Any | None:
+        """A file that ``invalidate_from`` moved to ``attempts/<attempt>``, or ``None``."""
+        try:
+            path = self.run_dir / "attempts" / str(attempt) / stage_dirname(stage) / relpath
+            return json.loads(filecache.read_text(path))
+        except (OSError, ValueError):
+            return None
 
     def invalidate_from(self, stage: int, attempt: int) -> list[int]:
         """Move ``stage-NN`` (NN >= ``stage``) into ``attempts/<attempt>/`` before a rerun."""

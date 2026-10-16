@@ -25,7 +25,7 @@ _ON_TOPIC = [
     ),
     ("Irregular sleep schedules and exam scores: a cohort study", 2021, "Nature Human Behaviour"),
     ("A meta-analysis of sleep and student exam outcomes", 2020, "Psychological Bulletin"),
-    ("Napping, memory consolidation and examination results", 2017, "Learning and Memory"),
+    ("Napping, memory consolidation and exam results", 2017, "Learning and Memory"),
     ("Sleep quality, stress and grades in college freshmen", 2022, "Frontiers in Psychology"),
     ("Circadian preference and exam performance of students", 2016, "Chronobiology International"),
     ("Actigraphy-measured sleep and standardized test scores", 2023, "SLEEP"),
