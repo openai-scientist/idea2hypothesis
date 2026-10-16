@@ -45,11 +45,15 @@ No `utils/` package and no catch-all `_helpers.py`: helpers sit next to the comp
 
 ## Commands
 
-Install is in [README.md](README.md#install). Tests must work offline. Run `ruff` and `pytest`
-before finishing a change.
+Install is in [README.md](README.md#install). Tests must work offline. During implementation,
+use a focused behavioral test after each edit; do not repeat the full suite for every small edit.
+Run affected coverage against the target branch before pushing, and run `ruff` plus the full
+suite once for final handoff (repeat only after a relevant change or unresolved failure).
 
 ```bash
 python -m ruff check .
+python tools/test_feedback.py --files tests/unit/test_parsing.py  # scoped edit loop
+python tools/test_feedback.py --base origin/main                # affected, before push
 python -m pytest -q
 uv run --with pytest-xdist pytest -q -p no:cacheprovider -n 8  # full suite in parallel, ~2.5 min
 python -m build
@@ -59,6 +63,12 @@ python tools/dashboard/server.py   # run viewer
 
 CI runs the same checks on Ubuntu and Windows (Python 3.11 and 3.13), audits the wheel (no tests,
 tools or runs; prompt YAML present) and imports the core wheel in an environment without extras.
+PRs use the same affected selector as the local command. Main, release branches/tags, scheduled
+and manual runs retain the full suite. `gate` is the always-running required-check entry point.
+See [the audit and lane rules](docs/test-audit.md). Shared core, fixtures, runtime assets,
+configuration, tooling/CI, unknown paths and unavailable diffs select all tests. When adding a
+test file, register its owner in `tools/test_feedback.py`; API consumers include
+`test_api_idle.py` and `test_stage_helpers.py` despite their unit directory.
 
 ## Change rules
 
