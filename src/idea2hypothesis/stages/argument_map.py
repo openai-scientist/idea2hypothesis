@@ -355,7 +355,8 @@ def build_graph(
 def _item(text: Any, *refs: str) -> dict[str, Any]:
     item: dict[str, Any] = {"text": str(text)}
     if refs:
-        item["refs"] = [r for r in refs if r]
+        # Once each: a tension the model drew between a cluster and itself names it twice.
+        item["refs"] = list(dict.fromkeys(r for r in refs if r))
     return item
 
 

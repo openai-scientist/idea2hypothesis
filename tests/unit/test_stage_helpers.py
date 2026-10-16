@@ -19,6 +19,7 @@ from idea2hypothesis.pipeline.contracts import (
 )
 from idea2hypothesis.resources.hardware import HardwareProfile, detect_hardware
 from idea2hypothesis.stages import literature_screen as screen
+from idea2hypothesis.stages.argument_map import build_canvas
 from idea2hypothesis.stages.base import gather_limited
 from idea2hypothesis.stages.hypothesis_debate import (
     Candidate,
@@ -1016,3 +1017,21 @@ def test_sources_down_needs_every_request_to_fail(tmp_path) -> None:
     }
     ctx = SimpleNamespace(artifacts=SimpleNamespace(read_json=lambda stage, name: meta))
     assert screen._sources_down(ctx) == ["arxiv (boom)"]
+
+
+def test_canvas_names_each_record_once() -> None:
+    """A tension the model drew between a cluster and itself still lists the cluster once."""
+    canvas = build_canvas(
+        topic="Topic",
+        goal={},
+        tree={"sub_questions": []},
+        synthesis={
+            "clusters": [],
+            "tensions": [{"text": "They disagree.", "between": ["C2", "C2"]}],
+        },
+        hypotheses=[],
+    )
+    for piece in canvas["pieces"]:
+        for item in piece["items"]:
+            refs = item.get("refs", [])
+            assert len(refs) == len(set(refs)), (piece["id"], refs)
