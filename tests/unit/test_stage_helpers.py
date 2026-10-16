@@ -189,9 +189,7 @@ def test_prefilter_needs_two_matches_from_three_keywords_and_can_be_relaxed() ->
 
 def test_the_strict_prefilter_is_relaxed_when_too_few_papers_remain() -> None:
     keywords = ["sleep", "exam", "students"]
-    strong = [
-        {"paper_id": f"s{i}", "title": "Sleep exam", "abstract": "x"} for i in range(6)
-    ]
+    strong = [{"paper_id": f"s{i}", "title": "Sleep exam", "abstract": "x"} for i in range(6)]
     weak = [{"paper_id": "w", "title": "Sleep", "abstract": "x"}]
     to_screen, dropped, warns = screen.select_for_screening(strong + weak, keywords, 2)
     assert len(to_screen) == 6 and [r["paper_id"] for r in dropped] == ["w"] and not warns
@@ -962,3 +960,59 @@ def test_a_merge_may_flip_a_candidate_whose_subtraction_is_reversed() -> None:
     assert any("predict different effects" in e for e in errors())
     assert not any("predict different effects" in e for e in errors(reoriented=["contrarian-3"]))
     assert any("must be candidates listed in from" in e for e in errors(reoriented=["other-1"]))
+
+
+def test_round_view_ignores_a_review_that_failed() -> None:
+    from idea2hypothesis.stages.hypothesis_gen import _round_view
+
+    before = [{"id": "H1", "statement": "a"}]
+    failed = {"round": 1, "error": "reviewer timed out", "findings": []}
+    assert _round_view(failed, 1, before, before) is None
+    assert _round_view(None, 1, before, before) is None
+    ok = {"round": 1, "findings": [{"hypothesis_id": "H1", "severity": "blocking"}]}
+    view = _round_view(ok, 1, before, before)
+    assert view is not None and view[0][0]["id"] == "F1-1" and view[1] == set()
+
+
+def test_named_ids_count_every_research_lead_line_but_the_charter_framing() -> None:
+    from types import SimpleNamespace
+
+    from idea2hypothesis.stages.hypothesis_gen import _named_ids
+
+    prior = {"H1": "a", "H2": "b", "H3": "c"}
+
+    def named(*constraints: str) -> set[str]:
+        return _named_ids(SimpleNamespace(constraints=list(constraints), feedback=""), prior)
+
+    risk = "Research lead: Known risk R1 (from hypothesis, H1, finding F4-1): confounding"
+    assert named(risk) == {"H1"}
+    assert named("Research lead: Directive: tighten H2") == {"H2"}
+    assert named("Research lead: Handoff: drop H3") == {"H3"}
+    assert named("Research lead: Research question: does H1 hold?") == set()
+
+
+def test_revision_note_blank_is_repaired_or_defaulted() -> None:
+    from idea2hypothesis.api.contract.review import revision_response
+    from idea2hypothesis.stages.hypothesis_gen import _check_revision_responses
+
+    for note in ("  ", 5, None):
+        doc = {"items": [{"finding_id": "F1-1", "outcome": "rebutted", "note": note}]}
+        item = revision_response(doc, round_=1, before="a", after="b").items[0]
+        assert item.note and item.note.strip()
+    blank = {"revision_responses": [{"finding_id": "F1-1", "outcome": "rebutted", "note": " "}]}
+    assert _check_revision_responses(blank, ["F1-1"]).errors
+    fixed = {"revision_responses": [{"finding_id": "F1-1", "outcome": "fixed"}]}
+    assert not _check_revision_responses(fixed, ["F1-1"]).errors
+
+
+def test_sources_down_needs_every_request_to_fail(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    meta = {
+        "per_source": {
+            "openalex": {"requests": 4, "papers": 0, "errors": ["HTTP 429"]},
+            "arxiv": {"requests": 2, "papers": 0, "errors": ["boom", "boom"]},
+        }
+    }
+    ctx = SimpleNamespace(artifacts=SimpleNamespace(read_json=lambda stage, name: meta))
+    assert screen._sources_down(ctx) == ["arxiv (boom)"]

@@ -61,6 +61,10 @@ def _no_reason(outcome: str) -> str | None:
     return None if outcome == "fixed" else "No reason given by the reviser."
 
 
+def _note(note: Any, outcome: str) -> str | None:
+    return note if isinstance(note, str) and note.strip() else _no_reason(outcome)
+
+
 def revision_response(
     responses_doc: dict[str, Any], *, round_: int, before: str, after: str
 ) -> RevisionResponse:
@@ -73,7 +77,7 @@ def revision_response(
             RevisionItem(
                 finding_id=str(item["finding_id"]),
                 outcome=item["outcome"],
-                note=item.get("note") or _no_reason(item["outcome"]),
+                note=_note(item.get("note"), item["outcome"]),
             )
             for item in responses_doc["items"]
         ],

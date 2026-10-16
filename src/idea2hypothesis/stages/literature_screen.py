@@ -408,7 +408,7 @@ async def run(ctx: StageContext) -> list[str]:
 
 
 def _sources_down(ctx: StageContext) -> list[str]:
-    """Sources of the collected literature that failed every search, with their first error."""
+    """Sources of the collected literature that failed every request, with their first error."""
     try:
         per_source = ctx.artifacts.read_json(STAGE - 1, "search_meta.json").get("per_source") or {}
     except (OSError, ValueError, AttributeError):
@@ -416,5 +416,8 @@ def _sources_down(ctx: StageContext) -> list[str]:
     return [
         f"{name} ({stats['errors'][0]})"
         for name, stats in sorted(per_source.items())
-        if isinstance(stats, dict) and not stats.get("papers") and stats.get("errors")
+        if isinstance(stats, dict)
+        and not stats.get("papers")
+        and stats.get("errors")
+        and len(stats["errors"]) >= stats.get("requests", 0)
     ]

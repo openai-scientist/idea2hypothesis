@@ -705,9 +705,15 @@ def _plain(text: Any) -> str:
 
 
 def _named_ids(ctx: StageContext, prior: dict[str, str]) -> set[str]:
-    """Prior ids the research lead's lines of this attempt name as a whole token."""
+    """Prior ids the research lead's lines of this attempt name as a whole token. Every
+    "Research lead:" line counts (directive, handoff, known risk), except the charter framing."""
+    from idea2hypothesis.pipeline.reuse import CHARTER_PREFIXES  # reuse imports this module
+
     lines = [
-        c for c in ctx.constraints if c.startswith(LEAD_DIRECTION_PREFIXES)
+        c
+        for c in ctx.constraints
+        if (c.startswith("Research lead: ") and not c.startswith(CHARTER_PREFIXES))
+        or c.startswith(LEAD_DIRECTION_PREFIXES)
     ] + ctx.feedback.splitlines()
     # The "Previous hypotheses: ..." list lists every id; it names none.
     text = "\n".join(re.sub(r"Previous hypotheses.*", "", line) for line in lines)
@@ -744,6 +750,9 @@ def _check_revision_responses(data: dict[str, Any], owed: list[str]) -> Findings
         if not isinstance(item, dict) or item.get("outcome") not in REVISION_OUTCOMES:
             f.error(f"each revision response needs an outcome from {list(REVISION_OUTCOMES)}")
             continue
+        note = item.get("note")
+        if item["outcome"] != "fixed" and not (isinstance(note, str) and note.strip()):
+            f.error(f"revision response for {item.get('finding_id')} needs a note: say why")
         answered.add(str(item.get("finding_id")))
     missing = [i for i in owed if i not in answered]
     f.require(not missing, f"revision_responses does not answer findings: {', '.join(missing)}")
@@ -805,13 +814,14 @@ def _round_view(
 ) -> tuple[list[dict[str, Any]], set[str]] | None:
     if not isinstance(before, list):
         return None
-    findings: list[dict[str, Any]] = []
-    if isinstance(review, dict):
-        round_ = review.get("round", default_round)
-        findings = [
-            {"id": f"{prefix}{round_}-{n}", **{k: f.get(k) for k in FINDING_FIELDS}}
-            for n, f in enumerate(review.get("findings") or [], 1)
-        ]
+    # A review that failed judged nothing: no hypothesis counts as reviewed, none as unchanged.
+    if not isinstance(review, dict) or review.get("error"):
+        return None
+    round_ = review.get("round", default_round)
+    findings = [
+        {"id": f"{prefix}{round_}-{n}", **{k: f.get(k) for k in FINDING_FIELDS}}
+        for n, f in enumerate(review.get("findings") or [], 1)
+    ]
     return findings, changed_hypotheses(before, hypotheses)
 
 
