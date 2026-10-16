@@ -351,10 +351,12 @@ async def _reuse_prior_run(
     if not request.prior_run_id:
         return None
     try:
-        why = reuse.problem(
-            services.store, request.prior_run_id, topic,
+        # Hashes and validates stages 1-7: keep it off the event loop.
+        why = await asyncio.to_thread(
+            reuse.problem, services.store, request.prior_run_id, topic,
             list(request.domains or services.config.research.domains),
             list(request.constraints or services.config.research.constraints),
+            mode=mode,
         )  # fmt: skip
         if why is None:
             await asyncio.to_thread(

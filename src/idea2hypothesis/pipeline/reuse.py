@@ -50,11 +50,14 @@ def problem(
     topic: str,
     domains: Sequence[str] = (),
     constraints: Sequence[str] = (),
+    *,
+    mode: str,
 ) -> str | None:
     """Why ``prior_id`` cannot supply stages 1-7 to a run on ``topic``, or ``None``.
 
     The run's ``domains`` and its framing ``constraints`` (the research lead's lines that
-    stage 1 treats as framing) must equal the earlier run's; other feedback lines may differ.
+    stage 1 treats as framing) and the review ``mode`` must equal the earlier run's; other
+    feedback lines may differ. A different mode would change which gates the researcher sees.
     """
     if not store.exists(prior_id):
         return f"run {prior_id} is not in the local store"
@@ -65,6 +68,8 @@ def problem(
         return f"run {prior_id} has different domains"
     if _framing(record.get("constraints") or []) != _framing(constraints):
         return f"run {prior_id} has different framing constraints"
+    if record.get("review_mode") != mode:
+        return f"run {prior_id} has a different review mode"
     checkpoint = store.read_checkpoint(prior_id)
     art = store.artifacts(prior_id)
     for n in REUSED_STAGES:

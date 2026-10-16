@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 from pathlib import Path
 
-from idea2hypothesis.pipeline import reuse
+from idea2hypothesis.pipeline import reuse, runner
 from idea2hypothesis.pipeline.models import GateAnswer, RunStatus
 from idea2hypothesis.pipeline.runner import answer_gate, run_pipeline
 from idea2hypothesis.stages import hypothesis_gen
@@ -166,6 +167,27 @@ async def test_prior_run_with_other_framing_is_not_reused(tmp_path: Path) -> Non
 
     assert fresh.count("topic_init") == 1
     assert "different framing" in _notices(services, second.run_id)[0]
+
+
+async def test_prior_run_with_other_review_mode_is_not_reused(tmp_path: Path) -> None:
+    services, fresh, second, _ = await _second_run(tmp_path, {}, {"review_mode": "full"})
+
+    assert fresh.count("topic_init") == 1
+    assert "different review mode" in _notices(services, second.run_id)[0]
+
+
+async def test_reuse_problem_check_runs_in_a_worker_thread(tmp_path: Path, monkeypatch) -> None:
+    calls: list[str] = []
+    real = asyncio.to_thread
+
+    async def spy(func, *args, **kwargs):
+        calls.append(func.__name__)
+        return await real(func, *args, **kwargs)
+
+    monkeypatch.setattr(runner.asyncio, "to_thread", spy)
+    await _second_run(tmp_path, {}, {})
+
+    assert "problem" in calls
 
 
 async def test_new_directive_or_handoff_does_not_block_reuse(tmp_path: Path) -> None:
