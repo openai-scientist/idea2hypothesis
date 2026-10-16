@@ -65,7 +65,7 @@ CI runs the same checks on Ubuntu and Windows (Python 3.11 and 3.13), audits the
 tools or runs; prompt YAML present) and imports the core wheel in an environment without extras.
 PRs use the same affected selector as the local command. Main, release branches/tags, scheduled
 and manual runs retain the full suite. `gate` is the always-running required-check entry point.
-See [the audit and lane rules](docs/test-audit.md). Shared core, fixtures, runtime assets,
+Lanes live in `tools/test_feedback.py`. Shared core, fixtures, runtime assets,
 configuration, tooling/CI, unknown paths and unavailable diffs select all tests. When adding a
 test file, register its owner in `tools/test_feedback.py`; API consumers include
 `test_api_idle.py` and `test_stage_helpers.py` despite their unit directory.

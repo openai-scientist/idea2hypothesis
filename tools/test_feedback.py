@@ -40,7 +40,7 @@ TEST_LANES = {
     **{f"tests/contracts/{name}": "api" for name in API},
     **{f"tests/contract/{name}": "api" for name in PLATFORM},
 }
-NARRATIVE = {"README.md", "AGENTS.md", "docs/test-audit.md", "docs/test-audit-ledger.csv"}
+NARRATIVE = {"README.md", "AGENTS.md"}
 GENERATED = {
     ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache",
     ".cache", "dist", "build", ".worktrees",

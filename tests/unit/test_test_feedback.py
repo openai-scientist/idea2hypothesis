@@ -30,7 +30,7 @@ from tools import test_feedback as feedback
         (".github/workflows/ci.yml", list(feedback.LANES)),
         ("unknown/new.py", list(feedback.LANES)),
         ("README.md", []),
-        ("docs/test-audit.md", []),
+        ("AGENTS.md", []),
     ],
 )
 def test_owner_and_shared_boundaries(path, lanes):
